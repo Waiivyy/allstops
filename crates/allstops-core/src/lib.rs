@@ -4,6 +4,7 @@
 
 pub mod builder;
 pub mod csa;
+pub mod itinerary;
 pub mod network;
 pub mod oracle;
 pub mod plan;
