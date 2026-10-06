@@ -16,3 +16,6 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+# Only for the GTFS loader comparison in `cargo xtask parse`.
+gtfs-structures = { version = "0.50.1", default-features = false }
+libc = "0.2"

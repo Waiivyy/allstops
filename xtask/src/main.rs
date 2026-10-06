@@ -1,5 +1,6 @@
 //! Project tasks: `cargo xtask <command>`.
 
+mod parse;
 mod real;
 mod routing;
 mod tuning;
@@ -19,11 +20,14 @@ enum Command {
     BoundTuning(tuning::Args),
     /// Time Connection Scan against RAPTOR on the full network.
     Routing(routing::Args),
+    /// Compare GTFS loaders on one feed: load time, peak memory, row counts.
+    Parse(parse::Args),
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::BoundTuning(a) => tuning::run(a),
         Command::Routing(a) => routing::run(a),
+        Command::Parse(a) => parse::run(a),
     }
 }
