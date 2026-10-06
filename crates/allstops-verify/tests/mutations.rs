@@ -250,4 +250,8 @@ fn verifier_does_not_use_the_solver_crate() {
         !manifest.contains("allstops-core"),
         "allstops-verify must not depend on allstops-core"
     );
+    assert!(
+        !manifest.contains("network"),
+        "allstops-verify must not enable the solver-facing network feature of allstops-gtfs"
+    );
 }
