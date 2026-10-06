@@ -249,7 +249,9 @@ pub fn profile(feed: &Feed) -> Profile {
         }
     }
 
-    let mut seen: HashSet<(u32, u32, Vec<(StopIdx, i32, i32)>)> = HashSet::new();
+    // Route, service and the full (stop, arrival, departure) sequence.
+    type TripKey = (u32, u32, Vec<(StopIdx, i32, i32)>);
+    let mut seen: HashSet<TripKey> = HashSet::new();
     let mut duplicates = 0;
     for (ti, t) in feed.trips.iter().enumerate() {
         let key: Vec<(StopIdx, i32, i32)> = feed
