@@ -42,17 +42,29 @@ pub fn load_feed(zip: &Path) -> Result<(Feed, Vec<u8>, f64)> {
     Ok((feed, bytes, t0.elapsed().as_secs_f64() * 1e3))
 }
 
-pub fn load(zip: &Path, rules_path: &Path, date: Option<&str>) -> Result<Real> {
-    let (feed, bytes, load_ms) = load_feed(zip)?;
-    let mut rules: Rules = toml::from_str(&std::fs::read_to_string(rules_path)?)?;
-    if let Some(d) = date {
-        rules.date = d.to_string();
-    }
+/// A rules file and the selection it names (relative to the rules file).
+pub fn load_rules(rules_path: &Path) -> Result<(Rules, Selection)> {
+    let rules: Rules = toml::from_str(
+        &std::fs::read_to_string(rules_path)
+            .with_context(|| format!("reading {}", rules_path.display()))?,
+    )?;
     let sel_path = rules_path
         .parent()
         .unwrap_or(Path::new("."))
         .join(&rules.selection);
-    let selection: Selection = toml::from_str(&std::fs::read_to_string(&sel_path)?)?;
+    let selection: Selection = toml::from_str(
+        &std::fs::read_to_string(&sel_path)
+            .with_context(|| format!("reading {}", sel_path.display()))?,
+    )?;
+    Ok((rules, selection))
+}
+
+pub fn load(zip: &Path, rules_path: &Path, date: Option<&str>) -> Result<Real> {
+    let (feed, bytes, load_ms) = load_feed(zip)?;
+    let (mut rules, selection) = load_rules(rules_path)?;
+    if let Some(d) = date {
+        rules.date = d.to_string();
+    }
     let t1 = Instant::now();
     let clustering = cluster(&feed, &ClusterConfig::default());
     let targets = select(&feed, &clustering, &selection)?;
