@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::csa::JLeg;
-use crate::network::{Network, Time};
+use crate::network::{Network, Time, flag};
 use crate::plan::{Plan, visits};
 use crate::rules::Rules;
 
@@ -81,6 +81,30 @@ pub struct Itinerary {
     pub gap: Option<f64>,
 }
 
+/// Stations a ride visits, in order: the boarding station and every later
+/// call that counts, with immediate repeats dropped. A loop line that comes
+/// back to an earlier station lists it again.
+pub fn ride_stations(net: &Network, trip: u32, from_pos: u16, to_pos: u16) -> Vec<String> {
+    let conns = net.trip_connections(trip);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: u32| {
+        let id = &net.stations[s as usize].id;
+        if out.last() != Some(id) {
+            out.push(id.clone());
+        }
+    };
+    for p in from_pos..=to_pos {
+        let c = &net.connections[conns[p as usize] as usize];
+        if p == from_pos && c.has(flag::VISIT_DEP) {
+            push(c.dep_station);
+        }
+        if c.has(flag::VISIT_ARR) {
+            push(c.arr_station);
+        }
+    }
+    out
+}
+
 /// `HH:MM:SS`, hours may exceed 23; negative times get a leading `-`.
 pub fn clock(t: Time) -> String {
     let sign = if t < 0 { "-" } else { "" };
@@ -115,18 +139,7 @@ pub fn to_itinerary(
                 let cs = net.trip_connections(trip);
                 let a = &net.connections[cs[from_pos as usize] as usize];
                 let b = &net.connections[cs[to_pos as usize] as usize];
-                let one = Plan {
-                    legs: vec![JLeg::Ride {
-                        trip,
-                        from_pos,
-                        to_pos,
-                        continues_origin: false,
-                    }],
-                };
-                let stations = visits(net, &one.legs)
-                    .into_iter()
-                    .map(|(s, _)| net.stations[s as usize].id.clone())
-                    .collect();
+                let stations = ride_stations(net, trip, from_pos, to_pos);
                 rides += 1;
                 (
                     a.dep,
@@ -211,4 +224,27 @@ pub fn to_itinerary(
         lower_bound_s: None,
         gap: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::test_support::{call, trip, with_stations};
+
+    #[test]
+    fn a_loop_lists_its_return_to_the_first_station() {
+        let mut b = with_stations(3, 60);
+        b.add_trip(
+            trip("ring", true),
+            &[
+                call(0, 0, 0),
+                call(1, 100, 100),
+                call(2, 200, 200),
+                call(0, 300, 300),
+            ],
+        );
+        let net = b.build();
+        assert_eq!(ride_stations(&net, 0, 0, 2), vec!["S0", "S1", "S2", "S0"]);
+        assert_eq!(ride_stations(&net, 0, 1, 2), vec!["S1", "S2", "S0"]);
+    }
 }
