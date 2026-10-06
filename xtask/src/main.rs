@@ -1,6 +1,7 @@
 //! Project tasks: `cargo xtask <command>`.
 
 mod parse;
+mod pack;
 mod real;
 mod routing;
 mod tuning;
@@ -22,6 +23,8 @@ enum Command {
     Routing(routing::Args),
     /// Compare GTFS loaders on one feed: load time, peak memory, row counts.
     Parse(parse::Args),
+    /// Compare pack formats (postcard, rkyv) on a real network.
+    Pack(pack::Args),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -29,5 +32,6 @@ fn main() -> anyhow::Result<()> {
         Command::BoundTuning(a) => tuning::run(a),
         Command::Routing(a) => routing::run(a),
         Command::Parse(a) => parse::run(a),
+        Command::Pack(a) => pack::run(a),
     }
 }
