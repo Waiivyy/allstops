@@ -29,17 +29,17 @@ pub struct PlanArgs {
 }
 
 pub struct PlanInput {
-    #[allow(dead_code, reason = "used by verify and export")]
     pub feed: Feed,
-    #[allow(dead_code, reason = "used by verify and export")]
     pub clustering: Clustering,
     pub rules: Rules,
-    #[allow(dead_code, reason = "used by verify and export")]
     pub selection: Selection,
     pub network: Network,
     pub report: BuildReport,
     pub load_ms: f64,
     pub build_ms: f64,
+    pub feed_sha256: String,
+    pub feed_ref: allstops_core::itinerary::FeedRef,
+    pub timezone: String,
 }
 
 pub fn load_rules(path: &Path, date: Option<&str>) -> Result<(Rules, Selection)> {
@@ -83,6 +83,38 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
         std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
     let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
     let load_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let feed_sha256 = crate::cmd_fetch::sha256_hex(&bytes);
+    let feed_version = feed
+        .feed_info
+        .as_ref()
+        .map(|f| f.version.clone())
+        .unwrap_or_default();
+    // Name and attribution from the registry when this exact file is pinned
+    // there; otherwise credit the publisher named in the feed.
+    let registered = crate::registry::Registry::load(&crate::default_registry())
+        .ok()
+        .and_then(|r| r.feeds.into_iter().find(|f| f.sha256 == feed_sha256));
+    let feed_ref = match registered {
+        Some(e) => allstops_core::itinerary::FeedRef {
+            attribution: e.render_attribution(&feed_version),
+            id: e.id,
+            sha256: feed_sha256.clone(),
+            feed_version: feed_version.clone(),
+        },
+        None => allstops_core::itinerary::FeedRef {
+            id: "unregistered".into(),
+            sha256: feed_sha256.clone(),
+            feed_version: feed_version.clone(),
+            attribution: format!(
+                "Timetable data: {}",
+                feed.feed_info
+                    .as_ref()
+                    .map(|f| f.publisher_name.as_str())
+                    .unwrap_or("see the feed's publisher")
+            ),
+        },
+    };
+    let timezone = feed.timezone()?.name().to_string();
     let t1 = Instant::now();
     let clustering = cluster(&feed, &ClusterConfig::default());
     let targets = select(&feed, &clustering, &selection)?;
@@ -117,5 +149,8 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
         report,
         load_ms,
         build_ms,
+        feed_sha256,
+        feed_ref,
+        timezone,
     })
 }

@@ -7,6 +7,9 @@ use allstops_core::rules::parse_clock;
 use anyhow::{Result, bail};
 use rayon::prelude::*;
 
+use allstops_core::itinerary::to_itinerary;
+
+use crate::check::{check_json, print_report};
 use crate::plan_input::{PlanArgs, load};
 use crate::{Outcome, style};
 
@@ -20,6 +23,9 @@ pub struct Args {
     /// Number of start times to try per start station.
     #[arg(long, default_value_t = 12)]
     start_count: i32,
+    /// Write the verified itinerary JSON here.
+    #[arg(long)]
+    out: Option<std::path::PathBuf>,
 }
 
 pub struct Best {
@@ -115,6 +121,44 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         return Ok(Outcome::Rejected);
     };
     let total = best.last - best.first;
+
+    // Nothing is shown unless the independent verifier accepts it.
+    let Some(itinerary) = to_itinerary(
+        net,
+        &best.plan,
+        &input.rules,
+        input.feed_ref.clone(),
+        &input.timezone,
+    ) else {
+        bail!("internal error: the best plan does not visit every target");
+    };
+    let doc = serde_json::to_string_pretty(&itinerary)?;
+    let report = check_json(
+        &input.feed,
+        &input.clustering,
+        &input.selection,
+        Some(&input.feed_sha256),
+        &doc,
+    )?;
+    if !report.passed {
+        eprintln!(
+            "{} the verifier rejected the planned route ({} violations). This is a bug; nothing is shown.",
+            style::bad("error:"),
+            report.violations.len()
+        );
+        print_report(&report);
+        return Ok(Outcome::Rejected);
+    }
+    if report.duration_s != Some(i64::from(total)) {
+        bail!(
+            "internal error: verifier duration {:?} differs from planned {total}",
+            report.duration_s
+        );
+    }
+    if let Some(out) = &args.out {
+        std::fs::write(out, &doc)?;
+        eprintln!("{} {}", style::dim("wrote"), out.display());
+    }
     let v = visits(net, &best.plan.legs);
     let rides = best
         .plan
@@ -152,6 +196,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
                 "greedy_runs": runs,
                 "feasible_runs": feasible,
                 "solve_ms": solve_ms.round(),
+                "verified": true,
                 "build_ms": input.build_ms.round(),
                 "load_ms": input.load_ms.round(),
             }))?
@@ -166,9 +211,17 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         println!("  last visit       {} at {}", last_station, hm(best.last));
         println!("  legs             {rides} rides, {walks} walks");
         println!("  greedy runs      {runs} ({feasible} covered every target) in {solve_ms:.0} ms");
+        println!("  {}", style::good("verified against the raw timetable"));
         println!(
             "{}",
-            style::dim("Times are service-day clock times (may exceed 24:00); not yet verified.")
+            style::dim("Times are service-day clock times (may exceed 24:00).")
+        );
+        println!("{}", style::dim(&itinerary.feed.attribution));
+        println!(
+            "{}",
+            style::dim(
+                "Planned from the published timetable. Real trains run late. Check official sources and ride safely."
+            )
         );
     }
     Ok(Outcome::Ok)
