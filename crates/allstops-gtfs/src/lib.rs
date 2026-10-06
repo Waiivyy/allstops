@@ -4,6 +4,7 @@
 
 pub mod archive;
 pub mod calendar;
+pub mod cluster;
 pub mod error;
 pub mod feed;
 pub mod fixture;
