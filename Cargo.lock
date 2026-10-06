@@ -46,6 +46,7 @@ dependencies = [
  "proptest",
  "serde",
  "thiserror",
+ "toml",
  "zip",
 ]
 
