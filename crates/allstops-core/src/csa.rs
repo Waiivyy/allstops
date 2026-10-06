@@ -31,7 +31,7 @@ pub enum Origin {
     Aboard { trip: TripIdx, pos: u16, time: Time },
     /// At the departure station of hop `pos` of `trip` at its departure
     /// `time`, having just boarded it. The runner may stay on it or take
-    /// anything else from this station.
+    /// another train from this station, but not start with a walk.
     Boarding { trip: TripIdx, pos: u16, time: Time },
 }
 
@@ -193,7 +193,8 @@ impl<'n> Csa<'n> {
                 l.visit_via[station as usize] = VisitVia::Origin;
                 l.board[station as usize] = time;
                 l.board_via[station as usize] = BoardVia::Origin;
-                relax_walks(net, l, station, time, NONE, NONE);
+                // No walk from here: the runner may have walked in, and
+                // walks never follow walks. Another train is fine.
                 time
             }
         };

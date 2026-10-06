@@ -91,6 +91,31 @@ fn connector_trips_move_but_do_not_visit() {
 }
 
 #[test]
+fn no_walk_straight_after_a_boarding_visit() {
+    // The runner walked to S1 and is boarding the metro there. Walking on to
+    // S2 now would chain two walks.
+    let mut b = with_stations(3, 60);
+    line(&mut b, "metro", &[(1, 100), (0, 200)], true);
+    line(&mut b, "metro2", &[(2, 300), (0, 400)], true);
+    b.add_footpath(1, 2, 50, 60.0);
+    let net = b.build();
+    let mut csa = Csa::new(&net);
+    let l = csa.run(
+        Origin::Boarding {
+            trip: 0,
+            pos: 0,
+            time: 100,
+        },
+        None,
+    );
+    assert_eq!(
+        l.visit[2], INF,
+        "S2 is only reachable on foot from the boarding point"
+    );
+    assert_eq!(l.visit[0], 200);
+}
+
+#[test]
 fn pickup_and_drop_off_rules_hold() {
     let mut b = with_stations(3, 0);
     let mut calls = vec![call(0, 0, 0), call(1, 100, 100), call(2, 200, 200)];

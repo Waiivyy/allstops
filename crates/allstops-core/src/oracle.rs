@@ -83,7 +83,8 @@ pub fn earliest_visits(net: &Network, origin: Origin) -> Vec<Time> {
                     visit[c.arr_station as usize] = visit[c.arr_station as usize].min(c.arr);
                 }
             }
-            push(&mut heap, &mut best, time, State::Free(c.dep_station));
+            // Another train from the platform, but no walk.
+            push(&mut heap, &mut best, time, State::Ready(c.dep_station));
         }
     }
 
