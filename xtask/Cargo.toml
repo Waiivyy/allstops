@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-allstops-gtfs.workspace = true
+allstops-gtfs = { workspace = true, features = ["network"] }
 allstops-core.workspace = true
 allstops-verify.workspace = true
 anyhow.workspace = true

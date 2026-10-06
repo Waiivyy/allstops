@@ -17,7 +17,7 @@ repository = "https://github.com/Waiivyy/allstops"
 authors = ["Waiivyy"]
 
 [workspace.dependencies]
-allstops-gtfs = { path = "crates/allstops-gtfs" }
+allstops-gtfs = { path = "crates/allstops-gtfs", default-features = false }
 allstops-core = { path = "crates/allstops-core" }
 allstops-verify = { path = "crates/allstops-verify" }
 csv = "1.4"

@@ -10,6 +10,7 @@ pub mod feed;
 pub mod fixture;
 pub mod inspect;
 pub mod limits;
+#[cfg(feature = "network")]
 pub mod network;
 pub mod select;
 pub mod table;
