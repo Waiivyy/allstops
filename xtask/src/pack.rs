@@ -286,7 +286,12 @@ fn median_ms<T, E>(runs: usize, mut f: impl FnMut() -> Result<T, E>) -> Result<f
         drop(out);
     }
     ms.sort_by(f64::total_cmp);
-    Ok(ms[ms.len() / 2])
+    let mid = ms.len() / 2;
+    Ok(if ms.len() % 2 == 1 {
+        ms[mid]
+    } else {
+        (ms[mid - 1] + ms[mid]) / 2.0
+    })
 }
 
 fn field_sizes<E>(
@@ -466,5 +471,21 @@ mod tests {
         .unwrap();
         assert_eq!(calls, 6);
         assert!(ms < 50.0, "{ms}");
+    }
+
+    #[test]
+    fn median_of_two_runs_averages_them() {
+        let mut calls = 0;
+        let ms = median_ms(2, || {
+            calls += 1;
+            if calls == 3 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Ok::<_, Infallible>(())
+        })
+        .unwrap();
+        // One run sleeps at least 40 ms and the other is near zero: their
+        // mean lies in 20..40 ms, while either run alone falls outside it.
+        assert!((20.0..40.0).contains(&ms), "{ms}");
     }
 }
