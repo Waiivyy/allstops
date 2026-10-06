@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c882367a633d979581741e87273ab518c5e50b3b12239c1ded0c0df8005629fd # shrinks to spec = Spec { stations: 3, change: 11, lines: [([1, 2], [30, 30, 30, 30, 30, 30], 1284, 494, true, [(true, true, true), (true, true, true), (true, false, true), (true, true, true), (true, true, true), (true, true, true)]), ([0, 2, 2, 1, 2], [329, 112, 275, 211, 341, 100], 1312, 516, false, [(false, true, true), (false, true, true), (true, true, true), (false, true, true), (true, true, false), (true, true, true)])], walks: [(1, 0, 401)], origin: (0, 823, 1, 20, 3) }
+cc bfe3f62f7ff68f09b4a0064e99139a63bf2d2d33115af778ec47642a205cca26 # shrinks to spec = Spec { stations: 3, change: 0, lines: [([0, 2], [30, 30, 30, 30, 30, 30], 49, 596, false, [(false, false, false), (false, true, false), (false, false, false), (false, false, false), (false, false, false), (false, false, false)]), ([1, 0, 2, 0], [30, 30, 30, 30, 30, 30], 0, 192, true, [(false, false, false), (false, false, false), (false, false, false), (false, false, true), (false, false, false), (false, false, false)])], walks: [], origin: (0, 0, 0, 0, 0) }

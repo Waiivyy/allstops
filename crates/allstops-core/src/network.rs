@@ -135,7 +135,9 @@ impl Network {
     /// Check the invariants the routing code relies on.
     pub fn validate(&self) -> Result<(), String> {
         let ns = self.stations.len() as u32;
-        if self.fp_start.len() != self.stations.len() + 1 || self.change_time.len() != self.stations.len() {
+        if self.fp_start.len() != self.stations.len() + 1
+            || self.change_time.len() != self.stations.len()
+        {
             return Err("station-indexed arrays have the wrong length".into());
         }
         for w in self.connections.windows(2) {

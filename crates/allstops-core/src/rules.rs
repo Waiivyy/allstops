@@ -82,7 +82,11 @@ pub fn parse_clock(s: &str) -> Option<i32> {
         Some(x) => x.parse().ok()?,
         None => 0,
     };
-    if it.next().is_some() || !(0..=99).contains(&h) || !(0..60).contains(&m) || !(0..60).contains(&sec) {
+    if it.next().is_some()
+        || !(0..=99).contains(&h)
+        || !(0..60).contains(&m)
+        || !(0..60).contains(&sec)
+    {
         return None;
     }
     Some(h * 3600 + m * 60 + sec)
@@ -130,7 +134,12 @@ mod tests {
     #[test]
     fn mode_names() {
         assert!(route_types_for_mode("tram").unwrap()[0].contains(&0));
-        assert!(route_types_for_mode("bus").unwrap().iter().any(|r| r.contains(&3)));
+        assert!(
+            route_types_for_mode("bus")
+                .unwrap()
+                .iter()
+                .any(|r| r.contains(&3))
+        );
         assert!(route_types_for_mode("hovercraft").is_none());
     }
 }

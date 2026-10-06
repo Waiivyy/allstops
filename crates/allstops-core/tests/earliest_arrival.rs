@@ -1,0 +1,298 @@
+//! Section 10 test 4: earliest arrival. The Connection Scan engine against a
+//! brute-force time-expanded Dijkstra oracle on random synthetic networks,
+//! plus hand-built cases for transfer times and visit semantics.
+
+use allstops_core::builder::test_support::{call, trip, with_stations};
+use allstops_core::builder::{Call, NetworkBuilder};
+use allstops_core::csa::{Csa, End, JLeg, Origin};
+use allstops_core::network::{INF, Network};
+use allstops_core::oracle::earliest_visits;
+use allstops_core::plan::visits;
+use proptest::prelude::*;
+
+fn line(b: &mut NetworkBuilder, name: &str, stops: &[(u32, i32)], visits: bool) {
+    let calls: Vec<Call> = stops.iter().map(|&(s, t)| call(s, t, t)).collect();
+    b.add_trip(trip(name, visits), &calls);
+}
+
+#[test]
+fn transfer_needs_change_time() {
+    // S0 -> S1 arriving 100; connecting trip leaves S1 at 130 or 200.
+    let mut b = with_stations(3, 60);
+    line(&mut b, "A", &[(0, 0), (1, 100)], true);
+    line(&mut b, "B1", &[(1, 130), (2, 230)], true);
+    line(&mut b, "B2", &[(1, 200), (2, 300)], true);
+    let net = b.build();
+    let mut csa = Csa::new(&net);
+    let l = csa.run(
+        Origin::At {
+            station: 0,
+            time: 0,
+        },
+        None,
+    );
+    assert_eq!(l.visit[2], 300, "130 is too soon after arriving at 100");
+}
+
+#[test]
+fn staying_aboard_needs_no_change_time() {
+    let mut b = with_stations(3, 600);
+    line(&mut b, "A", &[(0, 0), (1, 100), (2, 200)], true);
+    let net = b.build();
+    let mut csa = Csa::new(&net);
+    let l = csa.run(
+        Origin::Aboard {
+            trip: 0,
+            pos: 0,
+            time: 100,
+        },
+        None,
+    );
+    assert_eq!(l.visit[2], 200);
+}
+
+#[test]
+fn walking_does_not_visit_and_does_not_chain() {
+    let mut b = with_stations(4, 60);
+    b.add_footpath(0, 1, 50, 60.0);
+    b.add_footpath(1, 2, 50, 60.0);
+    line(&mut b, "A", &[(2, 500), (3, 600)], true);
+    line(&mut b, "B", &[(1, 100), (3, 900)], true);
+    let net = b.build();
+    let mut csa = Csa::new(&net);
+    let l = csa.run(
+        Origin::At {
+            station: 0,
+            time: 0,
+        },
+        None,
+    );
+    assert_eq!(l.visit[1], 100, "visited by boarding B, not by walking in");
+    assert_eq!(l.visit[2], INF, "S2 needs two walks in a row");
+    assert_eq!(l.visit[3], 900);
+}
+
+#[test]
+fn connector_trips_move_but_do_not_visit() {
+    let mut b = with_stations(3, 60);
+    line(&mut b, "bus", &[(0, 0), (1, 100), (2, 200)], false);
+    line(&mut b, "metro", &[(2, 300), (1, 400)], true);
+    let net = b.build();
+    let mut csa = Csa::new(&net);
+    let l = csa.run(
+        Origin::At {
+            station: 0,
+            time: 0,
+        },
+        None,
+    );
+    assert_eq!(l.visit[1], 400, "the bus passing S1 at 100 does not count");
+    assert_eq!(l.visit[2], 300, "boarding the metro at S2 counts");
+}
+
+#[test]
+fn pickup_and_drop_off_rules_hold() {
+    let mut b = with_stations(3, 0);
+    let mut calls = vec![call(0, 0, 0), call(1, 100, 100), call(2, 200, 200)];
+    calls[1].drop_off = false;
+    b.add_trip(trip("A", true), &calls);
+    line(&mut b, "B", &[(1, 150), (2, 160)], true);
+    let net = b.build();
+    let mut csa = Csa::new(&net);
+    let l = csa.run(
+        Origin::At {
+            station: 0,
+            time: 0,
+        },
+        None,
+    );
+    assert_eq!(
+        l.visit[1], 100,
+        "aboard through a stop counts even without alighting"
+    );
+    assert_eq!(l.visit[2], 200, "cannot alight at S1 to catch B");
+}
+
+#[test]
+fn pass_through_does_not_count() {
+    let mut b = with_stations(3, 0);
+    let mut calls = vec![call(0, 0, 0), call(1, 100, 100), call(2, 200, 200)];
+    calls[1].counts = false;
+    b.add_trip(trip("A", true), &calls);
+    let net = b.build();
+    let mut csa = Csa::new(&net);
+    assert_eq!(
+        csa.run(
+            Origin::At {
+                station: 0,
+                time: 0
+            },
+            None
+        )
+        .visit[1],
+        INF
+    );
+}
+
+// ---- Property test against the oracle -----------------------------------
+
+/// Stations of a line, hop times, first departure, headway, whether it
+/// visits, and (pickup, drop-off, counts) per call.
+type LineSpec = (Vec<u32>, Vec<i32>, i32, i32, bool, Vec<(bool, bool, bool)>);
+
+#[derive(Debug, Clone)]
+struct Spec {
+    stations: usize,
+    change: i32,
+    lines: Vec<LineSpec>,
+    walks: Vec<(u32, u32, i32)>,
+    origin: (u32, i32, u8, u32, u16),
+}
+
+fn spec() -> impl Strategy<Value = Spec> {
+    (3usize..8, 0i32..180).prop_flat_map(|(n, change)| {
+        let n32 = n as u32;
+        let line = (
+            proptest::collection::vec(0..n32, 2..6),
+            proptest::collection::vec(30i32..400, 6),
+            0i32..1800,
+            120i32..900,
+            proptest::bool::weighted(0.8),
+            proptest::collection::vec(
+                (
+                    proptest::bool::weighted(0.9),
+                    proptest::bool::weighted(0.9),
+                    proptest::bool::weighted(0.9),
+                ),
+                6,
+            ),
+        );
+        (
+            Just(n),
+            Just(change),
+            proptest::collection::vec(line, 1..5),
+            proptest::collection::vec((0..n32, 0..n32, 30i32..600), 0..6),
+            (0..n32, 0i32..2400, 0u8..3, 0u32..64, 0u16..6),
+        )
+            .prop_map(|(stations, change, lines, walks, origin)| Spec {
+                stations,
+                change,
+                lines,
+                walks,
+                origin,
+            })
+    })
+}
+
+fn build(spec: &Spec) -> Network {
+    let mut b = with_stations(spec.stations, spec.change);
+    for (li, (stops, hops, first, headway, visits, flags)) in spec.lines.iter().enumerate() {
+        let mut seq = stops.clone();
+        seq.dedup();
+        if seq.len() < 2 {
+            continue;
+        }
+        for k in 0..4 {
+            let mut t = first + k * headway;
+            let mut calls = Vec::new();
+            for (i, &s) in seq.iter().enumerate() {
+                let (pickup, drop_off, counts) = flags[i];
+                calls.push(Call {
+                    stop: s,
+                    station: s,
+                    arr: t,
+                    dep: t + 20,
+                    pickup,
+                    drop_off,
+                    counts,
+                });
+                t += 20 + hops[i];
+            }
+            b.add_trip(trip(&format!("L{li}T{k}"), *visits), &calls);
+        }
+    }
+    for &(a, c, d) in &spec.walks {
+        if a != c {
+            b.add_footpath(a, c, d, d as f32);
+        }
+    }
+    b.build()
+}
+
+fn origin(net: &Network, spec: &Spec) -> Origin {
+    let (s, t, kind, trip, pos) = spec.origin;
+    if net.trips.is_empty() || kind == 0 {
+        return Origin::At {
+            station: s,
+            time: t,
+        };
+    }
+    let trip = trip % net.trips.len() as u32;
+    let hops = net.trip_connections(trip).len() as u16;
+    let pos = pos % hops;
+    let c = &net.connections[net.trip_connections(trip)[pos as usize] as usize];
+    if kind == 1 {
+        Origin::Aboard {
+            trip,
+            pos,
+            time: c.arr,
+        }
+    } else {
+        Origin::Boarding {
+            trip,
+            pos,
+            time: c.dep,
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("ALLSTOPS_PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(512),
+        .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn csa_matches_oracle(spec in spec()) {
+        let net = build(&spec);
+        net.validate().unwrap();
+        let o = origin(&net, &spec);
+        let want = earliest_visits(&net, o);
+        let mut csa = Csa::new(&net);
+        let got = csa.run(o, None).visit.clone();
+        prop_assert_eq!(&got, &want);
+
+        // Every finite label has a journey that really visits the station
+        // then, and journeys never move backwards in time.
+        for s in 0..net.stations.len() as u32 {
+            if got[s as usize] >= INF {
+                continue;
+            }
+            let j = csa.journey_to_visit(s).expect("journey for finite label");
+            let mut legs = j.legs.clone();
+            if let End::Boarding { trip, pos, .. } = j.end {
+                legs.push(JLeg::Ride { trip, from_pos: pos, to_pos: pos, continues_origin: false });
+            }
+            let v = visits(&net, &legs);
+            let at_origin = o.place(&net).0 == s;
+            let found = v.iter().any(|&(vs, vt)| vs == s && vt == got[s as usize]);
+            prop_assert!(found || (at_origin && j.legs.is_empty()), "station {} label {} legs {:?}", s, got[s as usize], j.legs);
+            let mut clock = o.place(&net).1;
+            for leg in &j.legs {
+                match *leg {
+                    JLeg::Walk { start, end, .. } => {
+                        prop_assert!(start >= clock && end > start);
+                        clock = end;
+                    }
+                    JLeg::Ride { trip, from_pos, to_pos, .. } => {
+                        let cs = net.trip_connections(trip);
+                        let first = &net.connections[cs[from_pos as usize] as usize];
+                        let last = &net.connections[cs[to_pos as usize] as usize];
+                        prop_assert!(first.dep >= clock);
+                        clock = last.arr;
+                    }
+                }
+            }
+        }
+    }
+}
