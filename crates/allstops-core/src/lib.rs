@@ -1,6 +1,6 @@
 //! Routing core for allstops: the network model, earliest-arrival search
 //! with visit tracking, plans, lower bounds and route search. Free of
-//! filesystem and network access so it compiles unchanged to WebAssembly.
+//! filesystem and network access so it can target WebAssembly.
 
 pub mod bound;
 pub mod builder;

@@ -1,6 +1,6 @@
 //! GTFS loading for allstops: input limits, service calendars, station
 //! clustering, target selection and footpaths. No filesystem or network
-//! access, so it compiles unchanged to WebAssembly; callers pass bytes in.
+//! access; callers pass bytes in, so the crate can target WebAssembly.
 
 pub mod archive;
 pub mod calendar;

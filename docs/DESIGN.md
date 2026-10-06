@@ -35,8 +35,9 @@ Crates (`crates/`):
 
 The verifier's dependency tree contains no solver code: `allstops-gtfs` is
 used without its `network` feature, and a test fails if that changes.
-`allstops-core` and `allstops-gtfs` take bytes, never paths, so they compile
-unchanged for WebAssembly.
+`allstops-core` and `allstops-gtfs` take bytes, never paths, and use no
+threads, files or network, so they are meant to compile unchanged for
+WebAssembly. That has not been tested yet (see WebAssembly below).
 
 ## GTFS loading
 
@@ -60,8 +61,8 @@ three sets. The deciding reasons are not speed:
   browser.
 - It rejects a whole feed for one dangling reference, silently keeps the last
   of duplicate IDs, and does not fill in omitted times.
-- allstops reads from bytes only, so it compiles for WebAssembly without
-  feature work.
+- allstops reads from bytes only, which is what a WebAssembly build needs
+  (not yet compiled for WebAssembly; see below).
 
 Neither loader expands `frequencies.txt` yet; MVV has none. That is Stage 1
 work.
