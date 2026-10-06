@@ -172,3 +172,62 @@ pub fn greedy(csa: &mut Csa, start: StationIdx, t0: Time) -> Option<Plan> {
     }
     None
 }
+
+/// A greedy result and the start it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Best {
+    pub plan: Plan,
+    /// First and last target visit.
+    pub first: Time,
+    pub last: Time,
+    pub start: StationIdx,
+    pub t0: Time,
+}
+
+/// [`greedy`] from `start` at `t0`, kept only when it visits every target.
+pub fn greedy_from(csa: &mut Csa, start: StationIdx, t0: Time) -> Option<Best> {
+    let plan = greedy(csa, start, t0)?;
+    let (first, last) = plan.duration(csa.net)?;
+    Some(Best {
+        plan,
+        first,
+        last,
+        start,
+        t0,
+    })
+}
+
+/// Every (start station, start time) pair, station by station: the runs
+/// [`best_greedy`] makes, in its order.
+pub fn greedy_jobs(starts: &[StationIdx], times: &[Time]) -> Vec<(StationIdx, Time)> {
+    starts
+        .iter()
+        .flat_map(|&s| times.iter().map(move |&t| (s, t)))
+        .collect()
+}
+
+/// The shortest of some greedy results, and how many there were. Ties go to
+/// the earlier start time and then the lower station index, so the choice
+/// does not depend on the order the results arrive in (or on thread
+/// scheduling when they are computed in parallel).
+pub fn shortest(results: impl IntoIterator<Item = Option<Best>>) -> (Option<Best>, usize) {
+    let mut feasible = 0;
+    let best = results
+        .into_iter()
+        .flatten()
+        .inspect(|_| feasible += 1)
+        .min_by_key(|b| (b.last - b.first, b.t0, b.start));
+    (best, feasible)
+}
+
+/// Run the greedy from every start station at every start time on this
+/// thread and keep the shortest result (see [`shortest`] for ties). Also
+/// returns how many runs visited every target.
+pub fn best_greedy(net: &Network, starts: &[StationIdx], times: &[Time]) -> (Option<Best>, usize) {
+    let mut csa = Csa::new(net);
+    shortest(
+        greedy_jobs(starts, times)
+            .into_iter()
+            .map(|(s, t0)| greedy_from(&mut csa, s, t0)),
+    )
+}

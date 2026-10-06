@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use allstops_core::csa::{Csa, JLeg};
 use allstops_core::network::{Network, StationIdx, Time};
-use allstops_core::plan::{Plan, greedy, visits};
+use allstops_core::plan::{Best, greedy_from, greedy_jobs, shortest, visits};
 use allstops_core::rules::parse_clock;
 use anyhow::{Result, bail};
 use rayon::prelude::*;
@@ -29,46 +29,14 @@ pub struct Args {
     out: Option<std::path::PathBuf>,
 }
 
-pub struct Best {
-    pub plan: Plan,
-    pub first: Time,
-    pub last: Time,
-    pub start: StationIdx,
-    pub t0: Time,
-}
-
-/// Run the greedy from every candidate start station and start time, in
-/// parallel, and keep the shortest. Ties go to the earlier start time and
-/// then the lower station index, so the result does not depend on thread
-/// scheduling.
+/// [`allstops_core::plan::best_greedy`] in parallel: the same runs and the
+/// same tie rule, so the result does not depend on thread scheduling.
 pub fn best_greedy(net: &Network, starts: &[StationIdx], times: &[Time]) -> (Option<Best>, usize) {
-    let jobs: Vec<(StationIdx, Time)> = starts
-        .iter()
-        .flat_map(|&s| times.iter().map(move |&t| (s, t)))
-        .collect();
-    let results: Vec<Option<Best>> = jobs
+    let results: Vec<Option<Best>> = greedy_jobs(starts, times)
         .par_iter()
-        .map_init(
-            || Csa::new(net),
-            |csa, &(s, t0)| {
-                let plan = greedy(csa, s, t0)?;
-                let (first, last) = plan.duration(net)?;
-                Some(Best {
-                    plan,
-                    first,
-                    last,
-                    start: s,
-                    t0,
-                })
-            },
-        )
+        .map_init(|| Csa::new(net), |csa, &(s, t0)| greedy_from(csa, s, t0))
         .collect();
-    let feasible = results.iter().filter(|r| r.is_some()).count();
-    let best = results
-        .into_iter()
-        .flatten()
-        .min_by_key(|b| (b.last - b.first, b.t0, b.start));
-    (best, feasible)
+    shortest(results)
 }
 
 pub fn hm(t: Time) -> String {
