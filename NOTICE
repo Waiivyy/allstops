@@ -12,7 +12,10 @@ were built from. Feeds are listed in data/feeds.toml.
 Munich (feed id "mvv")
   Münchner Verkehrs- und Tarifverbund GmbH (MVV)
   Source: https://www.mvv-muenchen.de/fahrplanauskunft/fuer-entwickler/opendata/index.html
-  Licence: Creative Commons Attribution (CC BY), as stated by the publisher
+  Licence: Creative Commons Attribution 4.0 (CC BY 4.0). The publisher's page
+  says "cc-by" without a version; the GovData catalogue lists CC BY 4.0.
+  Network packs built from this feed are adapted material: they contain
+  only the stations, trips and times needed for routing.
   Attribution requested by the publisher: "Münchner Verkehrs- und Tarifverbund
   GmbH (MVV)", the retrieval date and, where available, the feed version.
 

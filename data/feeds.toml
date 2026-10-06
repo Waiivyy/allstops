@@ -10,11 +10,13 @@ id = "mvv"
 name = "MVV Munich, whole network (GTFS-MVV-Gesamt)"
 url = "https://www.mvv-muenchen.de/fileadmin/mediapool/developer/opendata/gesamt_gtfs.zip"
 homepage = "https://www.mvv-muenchen.de/fahrplanauskunft/fuer-entwickler/opendata/index.html"
-# The publisher states "Creative Commons Attribution License (cc-by)" and links
-# to the Open Definition CC-BY page; no licence version is named.
-licence = "CC BY (version not stated by the publisher)"
-licence_url = "https://opendefinition.org/licenses/cc-by/"
-attribution = "Timetable data: Münchner Verkehrs- und Tarifverbund GmbH (MVV), CC BY, retrieved {retrieved}, feed version {feed_version}"
+# MVV's own page says "Creative Commons Attribution License (cc-by)" without a
+# version. The national open-data catalogue (GovData, entry contributed by the
+# City of Munich) lists this exact download URL as CC BY 4.0:
+# https://ckan.govdata.de/api/3/action/package_show?id=soll-fahrplandaten-mvv-gesamtnetz-gtfs
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Timetable data: Münchner Verkehrs- und Tarifverbund GmbH (MVV), CC BY 4.0, retrieved {retrieved}, feed version {feed_version}"
 redistribution = "allowed with attribution"
 sha256 = "13e9b6db7681c3849f57bc8afb97c3182b9994dbb512dd6d242af0fe6961b21c"
 retrieved = "2026-10-06"
