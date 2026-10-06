@@ -10,6 +10,7 @@ pub mod network;
 pub mod oracle;
 pub mod plan;
 pub mod profile;
+pub mod raptor;
 pub mod rules;
 
 pub use network::{Network, Time};
