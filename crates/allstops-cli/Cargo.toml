@@ -25,3 +25,5 @@ sha2.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 ureq = "3.4"
 toml_edit = "0.25"
+rayon = "1.12"
+chrono-tz.workspace = true

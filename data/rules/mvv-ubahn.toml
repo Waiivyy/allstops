@@ -1,0 +1,18 @@
+# Default rules for the Munich U-Bahn. Walking speed, detour factor and
+# transfer buffers are assumptions, not measurements. See docs/RULES.md.
+mode = "stops"
+selection = "../selections/mvv-ubahn.toml"
+date = "2026-11-14"
+earliest_start = "04:30"
+latest_end = "26:00"
+start = "any"
+end = "any"
+allow_walking = true
+walking_speed_kmh = 4.5
+walk_detour_factor = 1.3
+max_walk_m = 1200
+connector_modes = ["tram", "bus"]
+min_transfer_s = { same_station = 60, walk_link = 120 }
+tight_transfer_s = 120
+count_pass_through = false
+stay_aboard_through_terminus = false

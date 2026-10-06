@@ -1,6 +1,8 @@
 mod cmd_fetch;
 mod cmd_inspect;
+mod cmd_solve;
 mod cmd_stations;
+mod plan_input;
 mod registry;
 mod style;
 
@@ -30,6 +32,8 @@ enum Command {
     Inspect(cmd_inspect::Args),
     /// Cluster stops into stations and optionally list a selection's targets.
     Stations(cmd_stations::Args),
+    /// Plan a route that visits every target station.
+    Solve(cmd_solve::Args),
 }
 
 /// Exit codes: 0 success; 1 no feasible route or itinerary rejected by the
@@ -60,6 +64,7 @@ fn main() -> ExitCode {
         Command::Fetch(a) => cmd_fetch::run(a, cli.json),
         Command::Inspect(a) => cmd_inspect::run(a, cli.json),
         Command::Stations(a) => cmd_stations::run(a, cli.json),
+        Command::Solve(a) => cmd_solve::run(a, cli.json),
     };
     match result {
         Ok(Outcome::Ok) => ExitCode::SUCCESS,

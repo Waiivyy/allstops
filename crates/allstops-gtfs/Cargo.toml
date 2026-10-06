@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+allstops-core.workspace = true
 csv.workspace = true
 zip.workspace = true
 serde.workspace = true
