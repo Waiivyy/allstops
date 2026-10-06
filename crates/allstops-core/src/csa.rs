@@ -99,6 +99,9 @@ pub struct Labels {
     trip_enter: Vec<u32>,
     /// Lowest hop position usable on each reachable trip.
     trip_from: Vec<u16>,
+    /// Earliest time walks have been started from each station after
+    /// alighting. A walk from a later alighting there is dominated.
+    walked_from: Vec<Time>,
     pub origin: Origin,
     pub scanned: usize,
 }
@@ -124,6 +127,7 @@ impl<'n> Csa<'n> {
                 visit_via: vec![VisitVia::None; ns],
                 trip_enter: vec![NONE; net.trips.len()],
                 trip_from: vec![0; net.trips.len()],
+                walked_from: vec![INF; ns],
                 origin: Origin::At {
                     station: 0,
                     time: 0,
@@ -137,6 +141,7 @@ impl<'n> Csa<'n> {
     fn reset(&mut self) {
         let l = &mut self.labels;
         l.board.fill(INF);
+        l.walked_from.fill(INF);
         l.board_via.fill(BoardVia::None);
         l.visit.fill(INF);
         l.visit_via.fill(VisitVia::None);
@@ -179,6 +184,7 @@ impl<'n> Csa<'n> {
                         enter: ORIGIN_TRIP,
                         exit: conns[pos as usize],
                     };
+                    l.walked_from[station as usize] = time;
                     relax_walks(net, l, station, time, ORIGIN_TRIP, conns[pos as usize]);
                 }
                 time
@@ -269,7 +275,12 @@ impl<'n> Csa<'n> {
                         exit: ci as u32,
                     };
                 }
-                relax_walks(net, l, c.arr_station, c.arr, enter, ci as u32);
+                // Walks from an earlier alighting here reach everything no
+                // later, so only an earlier alighting needs to walk.
+                if c.arr < l.walked_from[a] {
+                    l.walked_from[a] = c.arr;
+                    relax_walks(net, l, c.arr_station, c.arr, enter, ci as u32);
+                }
             }
         }
         &self.labels
