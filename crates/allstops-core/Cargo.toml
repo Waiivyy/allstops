@@ -1,0 +1,16 @@
+[package]
+name = "allstops-core"
+description = "Earliest-arrival routing, visit tracking, lower bounds and route search for allstops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "allstops-gtfs"
+description = "GTFS loading with input limits, service calendars, station clustering and selection for allstops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+csv.workspace = true
+zip.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
