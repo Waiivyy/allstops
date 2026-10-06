@@ -47,6 +47,8 @@ struct NetStats {
     stops: usize,
     trips: usize,
     connections: usize,
+    /// Connections of trips that count as visits; the rest are connectors.
+    visit_connections: usize,
     footpaths: usize,
     targets: usize,
 }
@@ -74,6 +76,15 @@ struct Measured {
     round_trip: bool,
     /// Partial steps of `encode_ms` and `decode_ms`, in milliseconds.
     steps_ms: BTreeMap<&'static str, f64>,
+    /// Each vector field of the network encoded on its own.
+    fields: Vec<FieldSize>,
+}
+
+#[derive(Serialize)]
+struct FieldSize {
+    field: &'static str,
+    bytes: usize,
+    deflate6_bytes: usize,
 }
 
 #[derive(Serialize)]
@@ -83,6 +94,24 @@ struct Report {
     build_ms: f64,
     runs: usize,
     formats: Vec<Measured>,
+}
+
+/// Encode each vector field of a network (core or mirror) on its own with
+/// `$enc`, giving `(field name, Result<Vec<u8>, _>)` pairs.
+macro_rules! per_field {
+    ($n:expr, $enc:expr) => {
+        [
+            ("stations", ($enc)(&$n.stations)),
+            ("stops", ($enc)(&$n.stops)),
+            ("trips", ($enc)(&$n.trips)),
+            ("connections", ($enc)(&$n.connections)),
+            ("trip_conns", ($enc)(&$n.trip_conns)),
+            ("fp_start", ($enc)(&$n.fp_start)),
+            ("footpaths", ($enc)(&$n.footpaths)),
+            ("change_time", ($enc)(&$n.change_time)),
+            ("targets", ($enc)(&$n.targets)),
+        ]
+    };
 }
 
 pub fn run(a: Args) -> Result<()> {
@@ -95,16 +124,22 @@ pub fn run(a: Args) -> Result<()> {
         stops: net.stops.len(),
         trips: net.trips.len(),
         connections: net.connections.len(),
+        visit_connections: net
+            .connections
+            .iter()
+            .filter(|c| net.trips[c.trip as usize].visits)
+            .count(),
         footpaths: net.footpaths.len(),
         targets: net.targets.len(),
     };
     println!(
-        "network {}: {} stations, {} stops, {} trips, {} connections, {} footpaths, {} targets; built in {:.0} ms",
+        "network {}: {} stations, {} stops, {} trips, {} connections ({} on visit trips), {} footpaths, {} targets; built in {:.0} ms",
         real.report.date,
         stats.stations,
         stats.stops,
         stats.trips,
         stats.connections,
+        stats.visit_connections,
         stats.footpaths,
         stats.targets,
         real.build_ms
@@ -160,6 +195,7 @@ fn postcard_pack(net: &Network, rebuilt: &Network, runs: usize) -> Result<Measur
         rebuild_identical: postcard::to_allocvec(rebuilt)? == bytes,
         round_trip: postcard::to_allocvec(&decoded)? == bytes,
         steps_ms: BTreeMap::new(),
+        fields: field_sizes(per_field!(net, postcard::to_allocvec))?,
     })
 }
 
@@ -212,6 +248,9 @@ fn rkyv_pack(net: &Network, rebuilt: &Network, runs: usize) -> Result<Measured> 
         rebuild_identical: rkyv_bytes(rebuilt)?[..] == bytes[..],
         round_trip: postcard::to_allocvec(&decoded)? == postcard::to_allocvec(net)?,
         steps_ms,
+        fields: field_sizes(per_field!(owned, |v| {
+            rkyv::to_bytes::<rancor::Error>(v).map(|b| b.to_vec())
+        }))?,
     })
 }
 
@@ -231,6 +270,7 @@ fn json_pack(net: &Network, rebuilt: &Network, runs: usize) -> Result<Measured> 
         rebuild_identical: serde_json::to_vec(rebuilt)? == bytes,
         round_trip: postcard::to_allocvec(&decoded)? == postcard::to_allocvec(net)?,
         steps_ms: BTreeMap::new(),
+        fields: Vec::new(),
     })
 }
 
@@ -247,6 +287,25 @@ fn median_ms<T, E>(runs: usize, mut f: impl FnMut() -> Result<T, E>) -> Result<f
     }
     ms.sort_by(f64::total_cmp);
     Ok(ms[ms.len() / 2])
+}
+
+fn field_sizes<E>(
+    parts: impl IntoIterator<Item = (&'static str, Result<Vec<u8>, E>)>,
+) -> Result<Vec<FieldSize>>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    parts
+        .into_iter()
+        .map(|(field, bytes)| {
+            let bytes = bytes?;
+            Ok(FieldSize {
+                field,
+                bytes: bytes.len(),
+                deflate6_bytes: deflate_len(&bytes, Compression::new(6))?,
+            })
+        })
+        .collect()
 }
 
 fn deflate_len(bytes: &[u8], level: Compression) -> Result<usize> {
@@ -298,6 +357,20 @@ fn print_table(formats: &[Measured], runs: usize) {
         for (k, v) in &m.steps_ms {
             println!("- {k}: {v:.1}");
         }
+    }
+    let split: Vec<&Measured> = formats.iter().filter(|m| !m.fields.is_empty()).collect();
+    let Some(first) = split.first() else { return };
+    print!("\nbytes by field (each encoded on its own)\n\n| field |");
+    for m in &split {
+        print!(" {0} | {0} deflate -6 |", m.format);
+    }
+    println!("\n|---|{}", "---:|---:|".repeat(split.len()));
+    for (i, f) in first.fields.iter().enumerate() {
+        print!("| {} |", f.field);
+        for m in &split {
+            print!(" {} | {} |", m.fields[i].bytes, m.fields[i].deflate6_bytes);
+        }
+        println!();
     }
 }
 
