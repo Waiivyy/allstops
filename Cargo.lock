@@ -58,6 +58,8 @@ name = "allstops-verify"
 version = "0.0.1"
 dependencies = [
  "allstops-gtfs",
+ "chrono",
+ "chrono-tz",
  "serde",
  "serde_json",
  "thiserror",
