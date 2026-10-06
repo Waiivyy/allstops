@@ -1,0 +1,6 @@
+# Every station served by the Munich U-Bahn (GTFS route_type 1 in the MVV
+# feed). A station counts once however many lines or platform halls it has.
+name = "Munich U-Bahn"
+
+[[include]]
+route_types = [1]

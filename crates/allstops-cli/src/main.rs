@@ -1,5 +1,6 @@
 mod cmd_fetch;
 mod cmd_inspect;
+mod cmd_stations;
 mod registry;
 mod style;
 
@@ -27,6 +28,8 @@ enum Command {
     Fetch(cmd_fetch::Args),
     /// Print a profile of a GTFS zip: validity, structure and warnings.
     Inspect(cmd_inspect::Args),
+    /// Cluster stops into stations and optionally list a selection's targets.
+    Stations(cmd_stations::Args),
 }
 
 /// Exit codes: 0 success; 1 no feasible route or itinerary rejected by the
@@ -56,6 +59,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Fetch(a) => cmd_fetch::run(a, cli.json),
         Command::Inspect(a) => cmd_inspect::run(a, cli.json),
+        Command::Stations(a) => cmd_stations::run(a, cli.json),
     };
     match result {
         Ok(Outcome::Ok) => ExitCode::SUCCESS,
