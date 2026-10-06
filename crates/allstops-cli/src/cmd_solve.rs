@@ -7,6 +7,7 @@ use allstops_core::rules::parse_clock;
 use anyhow::{Result, bail};
 use rayon::prelude::*;
 
+use allstops_core::bound::{lower_bound, profile_lower_bound};
 use allstops_core::itinerary::to_itinerary;
 
 use crate::check::{check_json, print_report};
@@ -122,8 +123,31 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
     };
     let total = best.last - best.first;
 
+    // Two valid lower bounds; the larger one is reported.
+    let tb = Instant::now();
+    let static_bound = lower_bound(net, total);
+    let static_ms = tb.elapsed().as_secs_f64() * 1e3;
+    let tp = Instant::now();
+    let profile_bound = profile_lower_bound(net, total);
+    let profile_ms = tp.elapsed().as_secs_f64() * 1e3;
+    let bound_ms = static_ms + profile_ms;
+    let lb = match (&static_bound, &profile_bound) {
+        (Some(a), Some(b)) => Some(a.seconds.max(b.seconds)),
+        (Some(a), None) => Some(a.seconds),
+        (None, Some(b)) => Some(b.seconds),
+        (None, None) => None,
+    };
+    let gap = lb
+        .filter(|&l| l > 0)
+        .map(|l| f64::from(total - l) / f64::from(l));
+    if let Some(l) = lb
+        && l > total
+    {
+        bail!("internal error: lower bound {l}s exceeds a found route of {total}s");
+    }
+
     // Nothing is shown unless the independent verifier accepts it.
-    let Some(itinerary) = to_itinerary(
+    let Some(mut itinerary) = to_itinerary(
         net,
         &best.plan,
         &input.rules,
@@ -132,6 +156,8 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
     ) else {
         bail!("internal error: the best plan does not visit every target");
     };
+    itinerary.lower_bound_s = lb;
+    itinerary.gap = gap.map(|g| (g * 1e4).round() / 1e4);
     let doc = serde_json::to_string_pretty(&itinerary)?;
     let report = check_json(
         &input.feed,
@@ -196,6 +222,13 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
                 "greedy_runs": runs,
                 "feasible_runs": feasible,
                 "solve_ms": solve_ms.round(),
+                "lower_bound_s": lb,
+                "gap": gap,
+                "bound_ms": bound_ms.round(),
+                "static_bound_s": static_bound.as_ref().map(|b| b.seconds),
+                "static_bound_ms": static_ms.round(),
+                "profile_bound_s": profile_bound.as_ref().map(|b| b.seconds),
+                "profile_bound_ms": profile_ms.round(),
                 "verified": true,
                 "build_ms": input.build_ms.round(),
                 "load_ms": input.load_ms.round(),
@@ -210,6 +243,23 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         println!("  first visit      {} at {}", first_station, hm(best.first));
         println!("  last visit       {} at {}", last_station, hm(best.last));
         println!("  legs             {rides} rides, {walks} walks");
+        match (lb, gap) {
+            (Some(l), Some(g)) => println!("  lower bound      {} (gap {:.1}%)", dur(l), g * 100.0),
+            _ => println!("  lower bound      none (targets not connected)"),
+        }
+        let show = |b: &Option<allstops_core::bound::Bound>| {
+            b.as_ref()
+                .map(|b| dur(b.seconds))
+                .unwrap_or_else(|| "none".into())
+        };
+        println!(
+            "    static         {} ({static_ms:.0} ms)",
+            show(&static_bound)
+        );
+        println!(
+            "    profile        {} ({profile_ms:.0} ms)",
+            show(&profile_bound)
+        );
         println!("  greedy runs      {runs} ({feasible} covered every target) in {solve_ms:.0} ms");
         println!("  {}", style::good("verified against the raw timetable"));
         println!(

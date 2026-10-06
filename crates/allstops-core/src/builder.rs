@@ -225,3 +225,119 @@ pub mod test_support {
         b
     }
 }
+
+/// Seeded random networks for tests and benchmarks.
+pub mod random {
+    use super::test_support::{station, trip};
+    use super::{Call, NetworkBuilder};
+    use crate::network::{Network, Stop};
+
+    /// A small deterministic generator (64-bit LCG), so tests need no
+    /// external crate and results are identical on every platform.
+    pub struct Lcg(u64);
+
+    impl Lcg {
+        pub fn new(seed: u64) -> Self {
+            Lcg(seed ^ 0x9E37_79B9_7F4A_7C15)
+        }
+        pub fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+        pub fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n.max(1)
+        }
+        pub fn chance(&mut self, percent: u64) -> bool {
+            self.below(100) < percent
+        }
+    }
+
+    /// A small network: a few metro lines (which count as visits) with
+    /// several trips each in both directions, an occasional connector line
+    /// and a few walk links. Every station on a metro line is a target.
+    pub fn network(seed: u64, max_stations: usize) -> Network {
+        let mut r = Lcg::new(seed);
+        let n = 3 + r.below((max_stations.max(3) - 2) as u64) as usize;
+        let change = 30 + r.below(120) as i32;
+        let mut b = NetworkBuilder::new(0, 6 * 3600, change);
+        for i in 0..n {
+            let s = b.add_station(station(&format!("S{i}")));
+            b.add_stop(Stop {
+                id: format!("S{i}"),
+                station: s,
+                platform: String::new(),
+            });
+        }
+        let mut is_target = vec![false; n];
+        let lines = 1 + r.below(3);
+        for li in 0..lines + 1 {
+            let metro = li < lines || r.chance(30);
+            let len = 2 + r.below(4) as usize;
+            let mut seq: Vec<u32> = Vec::new();
+            while seq.len() < len {
+                let s = r.below(n as u64) as u32;
+                if seq.last() != Some(&s) && !seq.contains(&s) {
+                    seq.push(s);
+                }
+                if seq.len() >= n {
+                    break;
+                }
+            }
+            if seq.len() < 2 {
+                continue;
+            }
+            let hops: Vec<i32> = (0..seq.len()).map(|_| 60 + r.below(300) as i32).collect();
+            let headway = 300 + r.below(900) as i32;
+            let first = r.below(1800) as i32;
+            for dir in 0..2 {
+                let order: Vec<u32> = if dir == 0 {
+                    seq.clone()
+                } else {
+                    seq.iter().rev().copied().collect()
+                };
+                for k in 0..(3 + r.below(4)) as i32 {
+                    let mut t = first + k * headway + dir * 120;
+                    let mut calls = Vec::new();
+                    for (i, &s) in order.iter().enumerate() {
+                        let dwell = 20;
+                        calls.push(Call {
+                            stop: s,
+                            station: s,
+                            arr: t,
+                            dep: t + dwell,
+                            pickup: i + 1 < order.len() && !r.chance(5),
+                            drop_off: i > 0 && !r.chance(5),
+                            counts: !r.chance(5),
+                        });
+                        t += dwell + hops[i];
+                    }
+                    if metro {
+                        for c in &calls {
+                            if c.counts {
+                                is_target[c.station as usize] = true;
+                            }
+                        }
+                    }
+                    b.add_trip(trip(&format!("L{li}D{dir}K{k}"), metro), &calls);
+                }
+            }
+        }
+        for _ in 0..r.below(4) {
+            let (a, c) = (r.below(n as u64) as u32, r.below(n as u64) as u32);
+            if a != c {
+                let d = 120 + r.below(600) as i32;
+                b.add_footpath(a, c, d, d as f32);
+                b.add_footpath(c, a, d, d as f32);
+            }
+        }
+        for (s, t) in is_target.iter().enumerate() {
+            if *t {
+                b.add_target(s as u32);
+            }
+        }
+        b.build()
+    }
+}

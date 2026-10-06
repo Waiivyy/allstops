@@ -247,7 +247,7 @@ impl<'n> Csa<'n> {
             }
             let enter = l.trip_enter[t];
             let a = c.arr_station as usize;
-            if c.has(flag::VISIT_ARR) && c.arr < l.visit[a] {
+            if c.has(flag::VISIT_ARR) && c.arr <= net.window_end && c.arr < l.visit[a] {
                 l.visit[a] = c.arr;
                 l.visit_via[a] = VisitVia::Ride {
                     enter,
