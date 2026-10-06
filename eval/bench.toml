@@ -1,0 +1,19 @@
+# Real networks for `cargo xtask bench`. Paths are relative to the
+# repository root. A network whose zip cannot be found is skipped with a
+# message; feeds are never committed.
+#
+# Where the zip is looked for, first match wins:
+# 1. `--mvv-zip <path>` (the Munich network only);
+# 2. the environment variable named by `zip_env`;
+# 3. `zip` in this checkout;
+# 4. `zip` in the main checkout, when running from a git worktree.
+
+[[network]]
+id = "mvv-ubahn"
+name = "Munich U-Bahn"
+# Written by `allstops fetch mvv`.
+zip = "data/cache/mvv.gtfs.zip"
+zip_env = "ALLSTOPS_MVV_ZIP"
+rules = "data/rules/mvv-ubahn.toml"
+# A Monday, a Thursday and a Saturday.
+dates = ["2026-11-09", "2026-11-12", "2026-11-14"]

@@ -1747,6 +1747,7 @@ dependencies = [
  "allstops-gtfs",
  "allstops-verify",
  "anyhow",
+ "chrono",
  "clap",
  "flate2",
  "gtfs-structures",
@@ -1755,6 +1756,7 @@ dependencies = [
  "rkyv",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
 ]
 

@@ -1,9 +1,11 @@
 //! Project tasks: `cargo xtask <command>`.
 
-mod parse;
+mod bench;
 mod pack;
+mod parse;
 mod real;
 mod routing;
+mod synth;
 mod tuning;
 
 use clap::{Parser, Subcommand};
@@ -19,6 +21,8 @@ struct Cli {
 enum Command {
     /// Compare Held-Karp step rules on a real network's distance matrices.
     BoundTuning(tuning::Args),
+    /// Benchmark synthetic and real networks and write eval/RESULTS.md.
+    Bench(bench::Args),
     /// Time Connection Scan against RAPTOR on the full network.
     Routing(routing::Args),
     /// Compare GTFS loaders on one feed: load time, peak memory, row counts.
@@ -30,6 +34,7 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::BoundTuning(a) => tuning::run(a),
+        Command::Bench(a) => bench::run(a),
         Command::Routing(a) => routing::run(a),
         Command::Parse(a) => parse::run(a),
         Command::Pack(a) => pack::run(a),
