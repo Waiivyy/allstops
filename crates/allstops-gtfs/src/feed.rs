@@ -180,6 +180,8 @@ pub struct LoadWarnings {
 pub struct Feed {
     /// Base names of every file in the archive.
     pub files: Vec<String>,
+    /// Files present but holding no data rows.
+    pub empty_files: Vec<String>,
     pub feed_info: Option<FeedInfo>,
     pub agencies: Vec<Agency>,
     pub stops: Vec<Stop>,
@@ -220,6 +222,7 @@ impl Feed {
         let max_rows = limits.max_rows_per_file;
         let mut feed = Feed {
             files: ar.file_names().map(str::to_string).collect(),
+            empty_files: Vec::new(),
             feed_info: None,
             agencies: Vec::new(),
             stops: Vec::new(),
@@ -282,6 +285,14 @@ impl Feed {
         ar.with_reader("transfers.txt", |r| {
             load_transfers(&mut Table::new("transfers.txt", r, max_rows)?, &mut feed)
         })?;
+
+        let names = feed.files.clone();
+        for name in names.iter().filter(|n| n.ends_with(".txt")) {
+            let has_rows = ar.with_reader(name, |r| Table::new(name, r, max_rows)?.next_row())?;
+            if has_rows == Some(false) {
+                feed.empty_files.push(name.clone());
+            }
+        }
 
         let mut ids: Vec<(String, ServiceIdx)> = services.into_iter().collect();
         ids.sort_by_key(|(_, i)| *i);
