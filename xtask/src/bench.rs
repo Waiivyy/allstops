@@ -675,6 +675,12 @@ pub struct Summary {
     pub gap_max: Option<f64>,
     pub targets_mean: Option<f64>,
     pub connections_mean: Option<f64>,
+    pub metro_lines_mean: Option<f64>,
+    /// Networks with each generated feature.
+    pub with_branch: usize,
+    pub with_ring: usize,
+    pub with_bus: usize,
+    pub with_near_miss: usize,
     pub first_ms_median: Option<f64>,
     pub first_ms_max: Option<f64>,
     pub best_ms_median: Option<f64>,
@@ -710,6 +716,11 @@ pub fn summarise(group: &str, rows: &[&Row]) -> Summary {
     let col = |f: &dyn Fn(&Row) -> Option<f64>| -> Vec<f64> {
         rows.iter().filter_map(|r| f(r)).collect()
     };
+    let has = |f: &dyn Fn(&Shape) -> bool| {
+        rows.iter()
+            .filter(|r| r.shape.as_ref().is_some_and(f))
+            .count()
+    };
     let gaps_opt = col(&|r| r.gap_to_optimum);
     let gaps = col(&|r| r.gap);
     let first = col(&|r| r.first_ms);
@@ -740,6 +751,11 @@ pub fn summarise(group: &str, rows: &[&Row]) -> Summary {
         gap_max: max(&gaps),
         targets_mean: mean(&col(&|r| Some(r.targets as f64))),
         connections_mean: mean(&col(&|r| Some(r.connections as f64))),
+        metro_lines_mean: mean(&col(&|r| r.shape.as_ref().map(|s| s.metro_lines as f64))),
+        with_branch: has(&|s| s.branch),
+        with_ring: has(&|s| s.ring),
+        with_bus: has(&|s| s.bus),
+        with_near_miss: has(&|s| s.near_misses > 0),
         first_ms_median: median(&first),
         first_ms_max: max(&first),
         best_ms_median: median(&best),
@@ -873,8 +889,17 @@ fn markdown(meta: &Meta, sums: &[Summary], rows: &[Row], notes: &[String]) -> St
         line("connections, mean", &|x| {
             or_na(x.connections_mean, |v| format!("{v:.0}"))
         });
+        line("metro lines, mean", &|x| {
+            or_na(x.metro_lines_mean, |v| format!("{v:.2}"))
+        });
+        line("with a branch / ring / connector bus", &|x| {
+            format!("{} / {} / {}", x.with_branch, x.with_ring, x.with_bus)
+        });
+        line("with a line reached only on foot", &|x| {
+            x.with_near_miss.to_string()
+        });
         line("greedy found a route", &|x| share(x.feasible, x.instances));
-        line("verifier passed (of routes)", &|x| {
+        line("verifier passed the first and best route", &|x| {
             share(x.verified, x.feasible)
         });
         line("greedy equals the optimum", &|x| {
@@ -1146,8 +1171,9 @@ pub fn run(args: Args) -> Result<()> {
             eprintln!("FAILED {p}");
         }
         bail!(
-            "{} broken invariants; see eval/out/bench.json",
-            problems.len()
+            "{} problems (broken invariants or verifier rejections); see the Problems section of {}",
+            problems.len(),
+            shown(&md_path, &root)
         );
     }
     Ok(())
