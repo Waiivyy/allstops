@@ -2,7 +2,7 @@
 //! construction heuristic.
 
 use crate::csa::{Csa, End, JLeg, Origin};
-use crate::network::{INF, Network, StationIdx, Time, flag};
+use crate::network::{INF, Network, StationIdx, Time, TripIdx, flag};
 
 /// A route in network terms. The visited set is always recomputed from the
 /// legs with [`visits`]; nothing else is trusted.
@@ -230,4 +230,155 @@ pub fn best_greedy(net: &Network, starts: &[StationIdx], times: &[Time]) -> (Opt
             .into_iter()
             .map(|(s, t0)| greedy_from(&mut csa, s, t0)),
     )
+}
+
+/// A change between two rides of a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Change {
+    /// Index into the plan's legs of the ride boarded after the change.
+    pub leg: usize,
+    /// Station where that ride is boarded.
+    pub station: StationIdx,
+    /// Whether the runner walked between the two rides.
+    pub walked: bool,
+    /// Seconds to spare; negative when the plan breaks the change rules.
+    pub slack: Time,
+}
+
+/// Every change between two rides of `plan`, with its slack: the next
+/// departure minus the earliest moment it could be caught. Staying at the
+/// station, that moment is the previous arrival plus the station's change
+/// time; after a walk it is the end of the walk (walk durations already
+/// include the walk-link minimum). Staying aboard the same trip is not a
+/// change.
+pub fn transfer_slacks(net: &Network, plan: &Plan) -> Vec<Change> {
+    let mut out = Vec::new();
+    // Trip, alighting station and arrival of the last ride.
+    let mut prev: Option<(TripIdx, StationIdx, Time)> = None;
+    let mut walk_end: Option<Time> = None;
+    for (i, leg) in plan.legs.iter().enumerate() {
+        match *leg {
+            JLeg::Walk { end, .. } => walk_end = Some(end),
+            JLeg::Ride {
+                trip,
+                from_pos,
+                to_pos,
+                ..
+            } => {
+                let cs = net.trip_connections(trip);
+                let board = &net.connections[cs[from_pos as usize] as usize];
+                let alight = &net.connections[cs[to_pos as usize] as usize];
+                if let Some((prev_trip, at, arr)) = prev
+                    && prev_trip != trip
+                {
+                    let ready = walk_end.unwrap_or(arr + net.change_time[at as usize]);
+                    out.push(Change {
+                        leg: i,
+                        station: board.dep_station,
+                        walked: walk_end.is_some(),
+                        slack: board.dep - ready,
+                    });
+                }
+                prev = Some((trip, alight.arr_station, alight.arr));
+                walk_end = None;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::test_support::{call, trip, with_stations};
+
+    /// Trips 0 (S0 to S1), 1 and 2 (S1 to S2, the second too early for a
+    /// 60 s change), 3 (S3 to S4, S3 a 150 s walk from S1) and 4 (S2, S3,
+    /// S4).
+    fn net() -> Network {
+        let mut b = with_stations(5, 60);
+        b.add_trip(trip("A", true), &[call(0, 100, 100), call(1, 200, 200)]);
+        b.add_trip(trip("B", true), &[call(1, 300, 300), call(2, 400, 400)]);
+        b.add_trip(trip("C", true), &[call(1, 230, 230), call(2, 330, 330)]);
+        b.add_trip(trip("D", true), &[call(3, 400, 400), call(4, 500, 500)]);
+        b.add_trip(
+            trip("E", true),
+            &[call(2, 600, 600), call(3, 700, 700), call(4, 800, 800)],
+        );
+        b.add_footpath(1, 3, 150, 140.0);
+        let net = b.build();
+        net.validate().unwrap();
+        net
+    }
+
+    fn ride(trip: u32, from_pos: u16, to_pos: u16) -> JLeg {
+        JLeg::Ride {
+            trip,
+            from_pos,
+            to_pos,
+            continues_origin: false,
+        }
+    }
+
+    fn walk(from: StationIdx, to: StationIdx, start: Time, end: Time) -> JLeg {
+        JLeg::Walk {
+            from,
+            to,
+            start,
+            end,
+            metres: 140.0,
+        }
+    }
+
+    #[test]
+    fn change_at_a_station_counts_the_change_time() {
+        let net = net();
+        let plan = Plan {
+            legs: vec![ride(0, 0, 0), ride(1, 0, 0)],
+        };
+        assert_eq!(
+            transfer_slacks(&net, &plan),
+            vec![Change {
+                leg: 1,
+                station: 1,
+                walked: false,
+                slack: 300 - (200 + 60),
+            }]
+        );
+        // A departure inside the change time gives a negative slack.
+        let plan = Plan {
+            legs: vec![ride(0, 0, 0), ride(2, 0, 0)],
+        };
+        assert_eq!(transfer_slacks(&net, &plan)[0].slack, -30);
+    }
+
+    #[test]
+    fn change_after_a_walk_counts_from_the_walk_end() {
+        let net = net();
+        let plan = Plan {
+            legs: vec![ride(0, 0, 0), walk(1, 3, 200, 350), ride(3, 0, 0)],
+        };
+        assert_eq!(
+            transfer_slacks(&net, &plan),
+            vec![Change {
+                leg: 2,
+                station: 3,
+                walked: true,
+                slack: 400 - 350,
+            }]
+        );
+    }
+
+    #[test]
+    fn walks_before_the_first_ride_and_staying_aboard_are_not_changes() {
+        let net = net();
+        let plan = Plan {
+            legs: vec![walk(1, 3, 200, 350), ride(3, 0, 0)],
+        };
+        assert!(transfer_slacks(&net, &plan).is_empty());
+        let plan = Plan {
+            legs: vec![ride(4, 0, 0), ride(4, 1, 1)],
+        };
+        assert!(transfer_slacks(&net, &plan).is_empty());
+    }
 }
