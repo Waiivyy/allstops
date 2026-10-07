@@ -152,16 +152,33 @@ pub fn greedy(csa: &mut Csa, start: StationIdx, t0: Time) -> Option<Plan> {
                     continues_origin: false,
                 }]);
             }
+            end_where_alighting_is_allowed(net, &mut plan);
             return plan.duration(net).map(|_| plan);
         }
-        let labels = csa.run(origin, Some(&unvisited));
-        let mut best: Option<(Time, StationIdx)> = None;
-        for (s, &u) in unvisited.iter().enumerate() {
-            if u && labels.visit[s] < INF && best.is_none_or(|(t, _)| labels.visit[s] < t) {
-                best = Some((labels.visit[s], s as StationIdx));
+        // A run from `start` begins by visiting `start` whenever it can,
+        // even if another target could be visited sooner by walking there.
+        // The search for it stops at `start` alone, so an earlier visit
+        // elsewhere cannot end it first.
+        let mut target = None;
+        if plan.legs.is_empty() && pending.is_none() && unvisited[start as usize] {
+            let mut only = vec![false; net.stations.len()];
+            only[start as usize] = true;
+            if csa.run(origin, Some(&only)).visit[start as usize] < INF {
+                target = Some(start);
             }
         }
-        let (_, target) = best?;
+        if target.is_none() {
+            let labels = csa.run(origin, Some(&unvisited));
+            let mut best: Option<(Time, StationIdx)> = None;
+            for (s, &u) in unvisited.iter().enumerate() {
+                if u && labels.visit[s] < INF && best.is_none_or(|(t, _)| labels.visit[s] < t) {
+                    best = Some((labels.visit[s], s as StationIdx));
+                }
+            }
+            target = best.map(|(_, s)| s);
+        }
+        // The journey comes from whichever search found the target last.
+        let target = target?;
         let journey = csa.journey_to_visit(target)?;
         plan.extend(&journey.legs);
         if matches!(journey.end, End::Boarding { .. }) {
@@ -174,6 +191,21 @@ pub fn greedy(csa: &mut Csa, start: StationIdx, t0: Time) -> Option<Plan> {
 }
 
 /// A greedy result and the start it came from.
+/// If the last ride ends where alighting is not allowed, ride on to the
+/// first stop where it is. Every target is already visited, so the total
+/// time does not change; the run simply has to end somewhere the runner can
+/// get off.
+fn end_where_alighting_is_allowed(net: &Network, plan: &mut Plan) {
+    if let Some(JLeg::Ride { trip, to_pos, .. }) = plan.legs.last_mut() {
+        let conns = net.trip_connections(*trip);
+        let mut p = *to_pos as usize;
+        while !net.connections[conns[p] as usize].has(flag::DROP_OFF) && p + 1 < conns.len() {
+            p += 1;
+        }
+        *to_pos = p as u16;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Best {
     pub plan: Plan,
@@ -291,6 +323,60 @@ pub fn transfer_slacks(net: &Network, plan: &Plan) -> Vec<Change> {
 mod tests {
     use super::*;
     use crate::builder::test_support::{call, trip, with_stations};
+
+    #[test]
+    fn a_run_from_a_station_starts_by_visiting_it() {
+        // S0's first departure is at 1000; S1, a 120 s walk away, has one at
+        // 200. A run from S0 must still visit S0 first.
+        let mut b = with_stations(3, 60);
+        b.add_footpath(0, 1, 120, 100.0);
+        b.add_trip(
+            trip("late", true),
+            &[call(0, 1000, 1000), call(2, 1100, 1100)],
+        );
+        b.add_trip(trip("early", true), &[call(1, 200, 200), call(2, 300, 300)]);
+        b.add_trip(
+            trip("back", true),
+            &[call(2, 1200, 1200), call(1, 1300, 1300)],
+        );
+        for t in 0..3 {
+            b.add_target(t);
+        }
+        let net = b.build();
+        let mut csa = Csa::new(&net);
+        let p = greedy(&mut csa, 0, 0).expect("a route");
+        assert_eq!(visits(&net, &p.legs)[0], (0, 1000));
+    }
+
+    #[test]
+    fn the_last_ride_ends_where_alighting_is_allowed() {
+        let mut b = with_stations(3, 60);
+        let mut calls = vec![call(0, 0, 0), call(1, 100, 100), call(2, 200, 200)];
+        calls[1].drop_off = false;
+        b.add_trip(trip("A", true), &calls);
+        b.add_target(0);
+        b.add_target(1);
+        let net = b.build();
+        let mut csa = Csa::new(&net);
+        let p = greedy(&mut csa, 0, 0).expect("a route");
+        assert!(
+            matches!(p.legs.last(), Some(JLeg::Ride { to_pos: 1, .. })),
+            "the ride goes on to S2, where alighting is allowed: {:?}",
+            p.legs
+        );
+        assert_eq!(p.duration(&net), Some((0, 100)), "the time is unchanged");
+    }
+
+    #[test]
+    fn a_one_way_pair_still_has_a_static_bound() {
+        let mut b = with_stations(2, 60);
+        b.add_trip(trip("A", true), &[call(0, 0, 0), call(1, 100, 100)]);
+        b.add_target(0);
+        b.add_target(1);
+        let net = b.build();
+        let bound = crate::bound::lower_bound(&net, 100).expect("a bound");
+        assert_eq!(bound.seconds, 100);
+    }
 
     /// Trips 0 (S0 to S1), 1 and 2 (S1 to S2, the second too early for a
     /// 60 s change), 3 (S3 to S4, S3 a 150 s walk from S1) and 4 (S2, S3,

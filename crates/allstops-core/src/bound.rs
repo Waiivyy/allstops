@@ -267,10 +267,9 @@ pub fn profile_lower_bound(net: &Network, upper: Time) -> Option<Bound> {
 
 /// The static bound for a network.
 pub fn lower_bound(net: &Network, upper: Time) -> Option<Bound> {
+    // A pair unreachable in one direction is fine: the bound symmetrises
+    // with the shorter direction and gives up only when both are missing.
     let d = target_distances(net);
-    if d.iter().flatten().any(|&x| x == i64::MAX) {
-        return None;
-    }
     held_karp_path_bound(&d, i64::from(upper.min(INF)), 2000)
 }
 
