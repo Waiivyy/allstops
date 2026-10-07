@@ -80,7 +80,8 @@ impl NetworkBuilder {
     /// in order with non-decreasing times; trips with fewer than two calls
     /// are ignored.
     pub fn add_trip(&mut self, trip: Trip, calls: &[Call]) -> Option<u32> {
-        if calls.len() < 2 {
+        // Hop positions are u16: at most 65,536 hops, so 65,537 calls.
+        if calls.len() < 2 || calls.len() - 1 > u16::MAX as usize + 1 {
             return None;
         }
         let ti = self.trips.len() as u32;
