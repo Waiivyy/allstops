@@ -173,10 +173,12 @@ the U1 level of Olympia-Einkaufszentrum, which is the U1 terminus.
 | Closed terminal station | must still be visited on foot or by surface transport | **not supported**: the planner reports the station as unserved and the plan as infeasible |
 | Timing | doors closing on the first train to setting foot on the last platform | first visit to last visit (scheduled times) |
 
-The default rules file `data/rules/mvv-ubahn.toml` allows tram and bus but not
-regional rail or S-Bahn as connectors. Adding `"rail"` matches the GWR wording
-more closely. This choice changes what counts as a valid run and is left to the
-user.
+The default rules file `data/rules/mvv-ubahn.toml` allows tram and bus as
+connectors. In the MVV feed the S-Bahn lines are coded as tram (see
+`docs/DATA.md`), so in Munich the defaults also allow the S-Bahn, while
+regional trains (RB, RE; `route_type = 2`) need `"rail"` added. Allowing every
+scheduled mode matches the GWR wording most closely. This choice changes what
+counts as a valid run and is left to the user.
 
 ## Differences between planned and achieved times
 

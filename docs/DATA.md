@@ -33,7 +33,7 @@ Measured with `allstops inspect data/cache/mvv.gtfs.zip` (load 643 ms, profile
 | Missing optional files | transfers, frequencies, pathways, levels |
 | Empty files | `shapes.txt` has a header and no rows |
 | Agencies | 98, one time zone (Europe/Berlin) |
-| Routes by type | tram (0): 27 routes, 17,022 trips; subway (1): 9 routes, 12,476 trips; rail (2): 34 routes, 4,520 trips; bus (3): 829 routes, 81,207 trips |
+| Routes by type | `0` (tram): 27 routes, 17,022 trips; `1` (subway): 9 routes, 12,476 trips; `2` (rail): 34 routes, 4,520 trips; `3` (bus): 829 routes, 81,207 trips. See the note on route types below. |
 | Stops | 9,309 stations (`location_type = 1`) and 18,861 platforms, every platform with a `parent_station`; hierarchy depth 1 |
 | ID scheme | German DHID (`de:<area>:<station>:<level>:<platform>`) for 99.7% of stops; a few Austrian IDs (`at:…`) for cross-border stops |
 | Trips / stop_times | 115,225 / 2,217,866 |
@@ -43,6 +43,19 @@ Measured with `allstops inspect data/cache/mvv.gtfs.zip` (load 643 ms, profile
 
 Format details the loader handles: several files start with a UTF-8 byte-order
 mark, and headers and values are quoted.
+
+### Route types: the S-Bahn is coded as tram
+
+The feed gives every Munich S-Bahn line (S1 to S8 and S20, operated by DB
+Regio AG Bayern) `route_type = 0`, the GTFS code for tram. So `route_type 0`
+holds 18 tram routes (11,230 trips) and 9 S-Bahn routes (5,792 trips).
+Regional trains (RB and RE lines) are `route_type = 2`.
+
+allstops follows the published route types, so the connector mode `"tram"`
+also lets a runner ride the S-Bahn in Munich, and routes do use it (for
+example S1 from Moosach to Feldmoching). The solver and the verifier agree,
+because both read the same field. A per-feed override of route types is
+planned for Stage 1 so that a selection can name the modes it means.
 
 ### Warnings
 
