@@ -173,7 +173,7 @@ fn rebuild(real: &Real) -> Result<Network> {
         &cal,
         &clustering,
         &targets,
-        &visit_types(&real.selection),
+        &visit_types(&real.feed, &real.selection)?,
         &real.rules,
     )?;
     Ok(network)

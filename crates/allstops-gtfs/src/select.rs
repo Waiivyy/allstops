@@ -87,6 +87,45 @@ pub enum SelectError {
     UnknownStation(String),
     #[error("selection {0:?} matches no stations")]
     NoMatch(String),
+    #[error(
+        "selection {0:?} names no transit mode: add route_types, agencies or route_short_names to an include rule so it is clear which trips count as visits"
+    )]
+    NoVisitModes(String),
+}
+
+impl Rule {
+    /// Whether a route passes this rule's route filters.
+    fn matches_route(&self, route: &crate::feed::Route) -> bool {
+        (self.route_types.is_empty() || self.route_types.contains(&route.route_type))
+            && (self.agencies.is_empty() || self.agencies.contains(&route.agency_id))
+            && (self.route_short_names.is_empty()
+                || self
+                    .route_short_names
+                    .iter()
+                    .any(|p| glob_match(p, &route.short_name)))
+    }
+}
+
+/// The route types whose trips count as visits under this selection: the
+/// route types of every route matched by an include rule's route filters.
+/// Riding anything else never counts. A selection made only of station
+/// lists or areas names no mode, which is an error rather than a silent
+/// "every mode counts".
+pub fn visit_route_types(feed: &Feed, sel: &Selection) -> Result<Vec<u16>, SelectError> {
+    let mut types = BTreeSet::new();
+    for rule in sel.include.iter().filter(|r| r.has_trip_filter()) {
+        for route in &feed.routes {
+            if rule.matches_route(route) {
+                types.insert(route.route_type);
+            }
+        }
+        // Explicit route types count even when no route has them today.
+        types.extend(rule.route_types.iter().copied());
+    }
+    if types.is_empty() {
+        return Err(SelectError::NoVisitModes(sel.name.clone()));
+    }
+    Ok(types.into_iter().collect())
 }
 
 /// Station indices (into `clustering.stations`) selected, in ascending order.
@@ -122,19 +161,7 @@ pub fn select(
         let mut matched: BTreeSet<u32> = BTreeSet::new();
         if rule.has_trip_filter() {
             for (ti, trip) in feed.trips.iter().enumerate() {
-                let route = &feed.routes[trip.route as usize];
-                if !rule.route_types.is_empty() && !rule.route_types.contains(&route.route_type) {
-                    continue;
-                }
-                if !rule.agencies.is_empty() && !rule.agencies.contains(&route.agency_id) {
-                    continue;
-                }
-                if !rule.route_short_names.is_empty()
-                    && !rule
-                        .route_short_names
-                        .iter()
-                        .any(|p| glob_match(p, &route.short_name))
-                {
+                if !rule.matches_route(&feed.routes[trip.route as usize]) {
                     continue;
                 }
                 for st in feed.trip_stop_times(ti as u32) {
@@ -285,6 +312,41 @@ mod tests {
             select(&f, &c, &Selection::default()),
             Err(SelectError::Empty(String::new()))
         );
+    }
+
+    #[test]
+    fn visit_modes_come_from_the_matched_routes() {
+        let f = feed();
+        let by_type = Selection {
+            name: "metro".into(),
+            include: vec![Rule {
+                route_types: vec![1],
+                ..Rule::default()
+            }],
+            ..Selection::default()
+        };
+        assert_eq!(visit_route_types(&f, &by_type).unwrap(), vec![1]);
+        let by_name = Selection {
+            name: "trams by name".into(),
+            include: vec![Rule {
+                route_short_names: vec!["1?".into()],
+                ..Rule::default()
+            }],
+            ..Selection::default()
+        };
+        assert_eq!(visit_route_types(&f, &by_name).unwrap(), vec![0]);
+        let only_stations = Selection {
+            name: "list".into(),
+            include: vec![Rule {
+                stations: vec!["A".into()],
+                ..Rule::default()
+            }],
+            ..Selection::default()
+        };
+        assert!(matches!(
+            visit_route_types(&f, &only_stations),
+            Err(SelectError::NoVisitModes(_))
+        ));
     }
 
     #[test]

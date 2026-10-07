@@ -202,7 +202,7 @@ fn check_json(
         .into_iter()
         .map(|i| clustering.stations[i as usize].id.clone())
         .collect();
-    let types = visit_types(selection);
+    let types = visit_types(feed, selection)?;
     let ctx = allstops_verify::Context {
         feed,
         calendar: &cal,
@@ -280,7 +280,7 @@ fn run_instance(
         &cal,
         &clustering,
         &targets,
-        &visit_types(selection),
+        &visit_types(&src.feed, selection)?,
         rules,
     )?;
     row.build_ms = ms(t);

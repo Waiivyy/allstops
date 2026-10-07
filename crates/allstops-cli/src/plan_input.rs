@@ -10,7 +10,7 @@ use allstops_core::rules::Rules;
 use allstops_gtfs::calendar::ServiceCalendar;
 use allstops_gtfs::cluster::{ClusterConfig, Clustering, cluster};
 use allstops_gtfs::network::{BuildReport, build_network};
-use allstops_gtfs::select::{Selection, select};
+use allstops_gtfs::select::{Selection, select, visit_route_types};
 use allstops_gtfs::{Feed, Limits};
 use anyhow::{Context, Result};
 
@@ -61,19 +61,13 @@ pub fn load_rules(path: &Path, date: Option<&str>) -> Result<(Rules, Selection)>
     Ok((rules, selection))
 }
 
-/// Route types whose trips count as visits: those named by the selection's
-/// rules, or every type when the selection names none.
-pub fn visit_types(sel: &Selection) -> Vec<RangeInclusive<u16>> {
-    let types: Vec<RangeInclusive<u16>> = sel
-        .include
-        .iter()
-        .flat_map(|r| r.route_types.iter().map(|&t| t..=t))
-        .collect();
-    if types.is_empty() {
-        vec![0..=u16::MAX]
-    } else {
-        types
-    }
+/// Route types whose trips count as visits: those of the routes the
+/// selection's route filters match (see `select::visit_route_types`).
+pub fn visit_types(feed: &Feed, sel: &Selection) -> Result<Vec<RangeInclusive<u16>>> {
+    Ok(visit_route_types(feed, sel)?
+        .into_iter()
+        .map(|t| t..=t)
+        .collect())
 }
 
 pub fn load(args: &PlanArgs) -> Result<PlanInput> {
@@ -124,7 +118,7 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
         &cal,
         &clustering,
         &targets,
-        &visit_types(&selection),
+        &visit_types(&feed, &selection)?,
         &rules,
     )?;
     let build_ms = t1.elapsed().as_secs_f64() * 1e3;

@@ -170,7 +170,7 @@ pub fn run(a: Args) -> Result<()> {
         &cal,
         &clustering,
         &targets,
-        &crate::real::visit_types(&selection),
+        &crate::real::visit_types(&feed, &selection)?,
         &rules,
     )?;
     let network_build_ms = t.elapsed().as_secs_f64() * 1e3;

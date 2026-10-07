@@ -21,7 +21,7 @@ pub fn check_json(
         .into_iter()
         .map(|i| clustering.stations[i as usize].id.clone())
         .collect();
-    let types = visit_types(selection);
+    let types = visit_types(feed, selection)?;
     let ctx = Context {
         feed,
         calendar: &cal,

@@ -26,13 +26,13 @@ pub struct Real {
     pub build_ms: f64,
 }
 
-pub fn visit_types(sel: &Selection) -> Vec<RangeInclusive<u16>> {
-    let t: Vec<RangeInclusive<u16>> = sel
-        .include
-        .iter()
-        .flat_map(|r| r.route_types.iter().map(|&x| x..=x))
-        .collect();
-    if t.is_empty() { vec![0..=u16::MAX] } else { t }
+/// Route types whose trips count as visits, from the routes the
+/// selection's route filters match.
+pub fn visit_types(feed: &Feed, sel: &Selection) -> Result<Vec<RangeInclusive<u16>>> {
+    Ok(allstops_gtfs::select::visit_route_types(feed, sel)?
+        .into_iter()
+        .map(|t| t..=t)
+        .collect())
 }
 
 pub fn load_feed(zip: &Path) -> Result<(Feed, Vec<u8>, f64)> {
@@ -74,7 +74,7 @@ pub fn load(zip: &Path, rules_path: &Path, date: Option<&str>) -> Result<Real> {
         &cal,
         &clustering,
         &targets,
-        &visit_types(&selection),
+        &visit_types(&feed, &selection)?,
         &rules,
     )?;
     let build_ms = t1.elapsed().as_secs_f64() * 1e3;
