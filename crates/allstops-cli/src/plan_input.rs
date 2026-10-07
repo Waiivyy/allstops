@@ -50,6 +50,9 @@ pub fn load_rules(path: &Path, date: Option<&str>) -> Result<(Rules, Selection)>
     if let Some(d) = date {
         rules.date = d.to_string();
     }
+    rules
+        .validate()
+        .map_err(|m| anyhow::anyhow!("invalid rules in {}:\n{m}", path.display()))?;
     let sel_path = path
         .parent()
         .unwrap_or(Path::new("."))

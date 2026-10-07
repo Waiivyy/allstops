@@ -117,7 +117,7 @@ fn no_walk_straight_after_a_boarding_visit() {
 
 #[test]
 fn pickup_and_drop_off_rules_hold() {
-    let mut b = with_stations(3, 0);
+    let mut b = with_stations(3, 1);
     let mut calls = vec![call(0, 0, 0), call(1, 100, 100), call(2, 200, 200)];
     calls[1].drop_off = false;
     b.add_trip(trip("A", true), &calls);
@@ -140,7 +140,7 @@ fn pickup_and_drop_off_rules_hold() {
 
 #[test]
 fn pass_through_does_not_count() {
-    let mut b = with_stations(3, 0);
+    let mut b = with_stations(3, 1);
     let mut calls = vec![call(0, 0, 0), call(1, 100, 100), call(2, 200, 200)];
     calls[1].counts = false;
     b.add_trip(trip("A", true), &calls);
@@ -175,7 +175,7 @@ struct Spec {
 }
 
 fn spec() -> impl Strategy<Value = Spec> {
-    (3usize..8, 0i32..180).prop_flat_map(|(n, change)| {
+    (3usize..8, 1i32..180).prop_flat_map(|(n, change)| {
         let n32 = n as u32;
         let line = (
             proptest::collection::vec(0..n32, 2..6),

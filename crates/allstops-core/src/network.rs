@@ -170,6 +170,17 @@ impl Network {
                 return Err("target out of range".into());
             }
         }
+        // Changes and walks take time. With a zero, connections at the same
+        // instant could chain in an order the scans do not see.
+        if let Some(s) = self.change_time.iter().position(|&c| c < 1) {
+            return Err(format!("station {s} has a change time below 1 second"));
+        }
+        if let Some(f) = self.footpaths.iter().find(|f| f.duration < 1) {
+            return Err(format!(
+                "a walk to station {} takes less than 1 second",
+                f.to
+            ));
+        }
         Ok(())
     }
 }

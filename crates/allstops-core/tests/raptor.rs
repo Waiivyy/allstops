@@ -118,7 +118,7 @@ type LineSpec = (Vec<u32>, Vec<i32>, i32, i32, Vec<(bool, bool)>);
 
 /// Harder networks than `random::network`: stations repeat within a line,
 /// trips of one line run at different speeds and overtake each other,
-/// change times may be zero and walks go anywhere.
+/// change times may be as short as one second and walks go anywhere.
 #[derive(Debug, Clone)]
 struct Spec {
     stations: usize,
@@ -130,7 +130,7 @@ struct Spec {
 }
 
 fn spec() -> impl Strategy<Value = Spec> {
-    (3usize..8, 0i32..180).prop_flat_map(|(n, change)| {
+    (3usize..8, 1i32..180).prop_flat_map(|(n, change)| {
         let n32 = n as u32;
         let line = (
             proptest::collection::vec(0..n32, 2..7),

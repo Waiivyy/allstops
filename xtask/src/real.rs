@@ -48,6 +48,9 @@ pub fn load_rules(rules_path: &Path) -> Result<(Rules, Selection)> {
         &std::fs::read_to_string(rules_path)
             .with_context(|| format!("reading {}", rules_path.display()))?,
     )?;
+    rules
+        .validate()
+        .map_err(|m| anyhow::anyhow!("invalid rules in {}:\n{m}", rules_path.display()))?;
     let sel_path = rules_path
         .parent()
         .unwrap_or(Path::new("."))

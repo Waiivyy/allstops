@@ -73,6 +73,98 @@ impl Default for Rules {
     }
 }
 
+/// Longest plan window accepted, in seconds: 48 hours.
+pub const MAX_WINDOW_S: i32 = 48 * 3600;
+
+/// Longest transfer or walk minimum accepted, in seconds: one day.
+pub const MAX_TRANSFER_S: i32 = 24 * 3600;
+
+impl Rules {
+    /// Check every value before any work starts. Returns all problems found,
+    /// one per line.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut bad: Vec<String> = Vec::new();
+        let date_ok = self.date.len() == 10
+            && self.date.as_bytes()[4] == b'-'
+            && self.date.as_bytes()[7] == b'-'
+            && self
+                .date
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+        if !date_ok {
+            bad.push(format!("date {:?} is not YYYY-MM-DD", self.date));
+        }
+        match (
+            parse_clock(&self.earliest_start),
+            parse_clock(&self.latest_end),
+        ) {
+            (Some(s), Some(e)) if e <= s => {
+                bad.push("latest_end must be after earliest_start".into())
+            }
+            (Some(s), Some(e)) if e - s > MAX_WINDOW_S => bad.push(format!(
+                "the window from earliest_start to latest_end is longer than {} hours",
+                MAX_WINDOW_S / 3600
+            )),
+            (None, _) => bad.push(format!(
+                "earliest_start {:?} is not HH:MM",
+                self.earliest_start
+            )),
+            (_, None) => bad.push(format!("latest_end {:?} is not HH:MM", self.latest_end)),
+            _ => {}
+        }
+        if self.start.is_empty() || self.end.is_empty() {
+            bad.push("start and end must be \"any\" or a station ID".into());
+        }
+        if !(self.walking_speed_kmh.is_finite()
+            && self.walking_speed_kmh > 0.0
+            && self.walking_speed_kmh <= 30.0)
+        {
+            bad.push("walking_speed_kmh must be above 0 and at most 30".into());
+        }
+        if !(self.walk_detour_factor.is_finite()
+            && self.walk_detour_factor >= 1.0
+            && self.walk_detour_factor <= 5.0)
+        {
+            bad.push("walk_detour_factor must be between 1 and 5".into());
+        }
+        if !(self.max_walk_m.is_finite() && self.max_walk_m >= 0.0 && self.max_walk_m <= 10_000.0) {
+            bad.push("max_walk_m must be between 0 and 10000".into());
+        }
+        // At least one second: a change or walk taking no time would let
+        // connections at the same instant chain, which the scans and the
+        // lower bounds do not model.
+        for (name, v) in [
+            (
+                "min_transfer_s.same_station",
+                self.min_transfer_s.same_station,
+            ),
+            ("min_transfer_s.walk_link", self.min_transfer_s.walk_link),
+        ] {
+            if !(1..=MAX_TRANSFER_S).contains(&v) {
+                bad.push(format!(
+                    "{name} must be between 1 and {MAX_TRANSFER_S} seconds"
+                ));
+            }
+        }
+        if !(0..=MAX_TRANSFER_S).contains(&self.tight_transfer_s) {
+            bad.push(format!(
+                "tight_transfer_s must be between 0 and {MAX_TRANSFER_S} seconds"
+            ));
+        }
+        for m in &self.connector_modes {
+            if route_types_for_mode(m).is_none() {
+                bad.push(format!("unknown connector mode {m:?}"));
+            }
+        }
+        if bad.is_empty() {
+            Ok(())
+        } else {
+            Err(bad.join("\n"))
+        }
+    }
+}
+
 /// Parse `HH:MM` or `HH:MM:SS`; hours may exceed 23.
 pub fn parse_clock(s: &str) -> Option<i32> {
     let mut it = s.trim().split(':');
@@ -119,6 +211,34 @@ mod tests {
         assert_eq!(parse_clock("4:61"), None);
         assert_eq!(parse_clock("x"), None);
         assert_eq!(parse_clock("-1:00"), None);
+    }
+
+    #[test]
+    fn validation_rejects_nonsense_and_zero_transfer_times() {
+        assert_eq!(Rules::default().validate(), Ok(()));
+        let bad = |f: &dyn Fn(&mut Rules)| {
+            let mut r = Rules::default();
+            f(&mut r);
+            r.validate().unwrap_err()
+        };
+        assert!(bad(&|r| r.min_transfer_s.same_station = 0).contains("same_station"));
+        assert!(bad(&|r| r.min_transfer_s.walk_link = 0).contains("walk_link"));
+        assert!(bad(&|r| r.min_transfer_s.same_station = i32::MAX).contains("same_station"));
+        assert!(bad(&|r| r.walking_speed_kmh = 0.0).contains("walking_speed_kmh"));
+        assert!(bad(&|r| r.walking_speed_kmh = f64::NAN).contains("walking_speed_kmh"));
+        assert!(bad(&|r| r.walk_detour_factor = 0.5).contains("walk_detour_factor"));
+        assert!(bad(&|r| r.max_walk_m = -1.0).contains("max_walk_m"));
+        assert!(bad(&|r| r.max_walk_m = f64::INFINITY).contains("max_walk_m"));
+        assert!(bad(&|r| r.latest_end = "04:00".into()).contains("after earliest_start"));
+        assert!(bad(&|r| r.latest_end = "99:00".into()).contains("longer than"));
+        assert!(bad(&|r| r.date = "14.11.2026".into()).contains("YYYY-MM-DD"));
+        assert!(bad(&|r| r.connector_modes = vec!["hovercraft".into()]).contains("hovercraft"));
+        // Every problem is reported, not just the first.
+        let many = bad(&|r| {
+            r.walking_speed_kmh = -1.0;
+            r.min_transfer_s.walk_link = 0;
+        });
+        assert_eq!(many.lines().count(), 2);
     }
 
     #[test]

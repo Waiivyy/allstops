@@ -61,6 +61,9 @@ pub fn build_network(
         file: "rules".into(),
         message: m,
     };
+    rules
+        .validate()
+        .map_err(|m| bad(format!("invalid rules: {m}")))?;
     let date = NaiveDate::parse_from_str(&rules.date, "%Y-%m-%d")
         .map_err(|_| bad(format!("bad date {:?}", rules.date)))?;
     check_plan_date(feed, cal, date)?;
