@@ -80,7 +80,9 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
                 "stations_with_several_stops": multi,
                 "stations_with_dhid_merges": dhid_merges,
                 "members_by_reason": reasons,
-                "ambiguities": c.ambiguities,
+                "ambiguity_counts": c.ambiguity_counts,
+                "ambiguity_samples": c.ambiguities,
+                "clustering_complete": c.complete,
                 "selection": sel,
             }))?
         );
@@ -94,14 +96,20 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
     for (r, n) in &reasons {
         println!("  members by {r:<18} {n}");
     }
-    let far = c
-        .ambiguities
-        .iter()
-        .filter(|a| a.kind == "same_name_far_apart")
-        .count();
-    let close = c.ambiguities.len() - far;
-    println!("  same name, far apart         {far}");
-    println!("  different names, very close  {close}");
+    println!(
+        "  same name, far apart         {}",
+        c.ambiguity_counts.same_name_far_apart
+    );
+    println!(
+        "  different names, very close  {}",
+        c.ambiguity_counts.different_names_close
+    );
+    if !c.complete {
+        println!(
+            "  {}",
+            style::warn("a work limit stopped clustering early; check for many stops at one place")
+        );
+    }
     if let Some((name, ids)) = selected {
         println!("{}", style::bold(&format!("Selection: {name}")));
         println!("  target stations              {}", ids.len());

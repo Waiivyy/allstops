@@ -77,11 +77,32 @@ pub struct Ambiguity {
 #[derive(Debug, Clone, Serialize)]
 pub struct Clustering {
     pub stations: Vec<Station>,
+    /// Up to [`MAX_AMBIGUITY_SAMPLES`] ambiguous pairs, for review.
     pub ambiguities: Vec<Ambiguity>,
-    /// Station index for every stop of the feed.
+    /// All ambiguous pairs found, by kind, including those not kept as
+    /// samples.
+    pub ambiguity_counts: AmbiguityCounts,
+    /// False when a work limit stopped a scan early; counts are then lower
+    /// bounds and some merges by name may be missing.
+    pub complete: bool,
+    /// Station index for every stop of the feed. Every stop has one.
     #[serde(skip)]
     pub station_of_stop: Vec<u32>,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct AmbiguityCounts {
+    pub same_name_far_apart: usize,
+    pub different_names_close: usize,
+}
+
+/// Ambiguous pairs kept for display; the totals are still counted.
+pub const MAX_AMBIGUITY_SAMPLES: usize = 1000;
+
+/// Distance checks allowed per pairwise scan. Real feeds need far fewer;
+/// the limit only stops crafted feeds (thousands of stops at one point)
+/// from taking quadratic time.
+pub const PAIR_CHECK_BUDGET: u64 = 20_000_000;
 
 pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
 
@@ -195,10 +216,31 @@ pub fn cluster(feed: &Feed, cfg: &ClusterConfig) -> Clustering {
             by_name.entry(normalise_name(&s.name)).or_default().push(i);
         }
     }
-    for group in by_name.values() {
+    // Sweep each name group in latitude order, so only stops within the
+    // merge distance north-south of each other are compared.
+    let lat_window = cfg.same_name_m / 111_000.0;
+    let mut checks: u64 = 0;
+    let mut complete = true;
+    let mut names: Vec<&String> = by_name.keys().collect();
+    names.sort();
+    'groups: for name in names {
+        let mut group = by_name[name].clone();
+        group.sort_by(|&a, &b| {
+            let (la, lb) = (feed.stops[a as usize].lat, feed.stops[b as usize].lat);
+            la.total_cmp(&lb).then(a.cmp(&b))
+        });
         for (k, &a) in group.iter().enumerate() {
+            let sa = &feed.stops[a as usize];
             for &b in &group[k + 1..] {
-                let (sa, sb) = (&feed.stops[a as usize], &feed.stops[b as usize]);
+                let sb = &feed.stops[b as usize];
+                if sb.lat - sa.lat > lat_window {
+                    break;
+                }
+                checks += 1;
+                if checks > PAIR_CHECK_BUDGET {
+                    complete = false;
+                    break 'groups;
+                }
                 if distance_m(sa.lat, sa.lon, sb.lat, sb.lon) <= cfg.same_name_m && uf.union(a, b) {
                     reason[b.max(a) as usize] = MergeReason::NameDistance;
                 }
@@ -206,38 +248,52 @@ pub fn cluster(feed: &Feed, cfg: &ClusterConfig) -> Clustering {
         }
     }
 
-    // Collect clusters, keyed by their union-find representative.
+    // Collect clusters, keyed by their union-find representative. Every stop
+    // belongs to one, so nothing downstream ever meets a stop without a
+    // station. Entrances, nodes and boarding areas normally join their
+    // parent's cluster; one without a parent forms its own.
     let mut groups: BTreeMap<u32, Vec<StopIdx>> = BTreeMap::new();
     for i in 0..n as StopIdx {
-        let lt = feed.stops[i as usize].location_type;
-        if matches!(lt, LocationType::Platform | LocationType::Station) {
-            groups.entry(uf.find(i)).or_default().push(i);
-        }
+        groups.entry(uf.find(i)).or_default().push(i);
     }
     let mut station_of_stop = vec![u32::MAX; n];
     let mut stations = Vec::with_capacity(groups.len());
     for members in groups.values() {
         let idx = stations.len() as u32;
-        // Prefer a location_type=1 row for the name and position.
+        // Prefer a location_type=1 row for the name and position, then a
+        // platform.
         let anchor = members
             .iter()
             .copied()
             .find(|&m| feed.stops[m as usize].location_type == LocationType::Station)
+            .or_else(|| {
+                members
+                    .iter()
+                    .copied()
+                    .find(|&m| feed.stops[m as usize].location_type == LocationType::Platform)
+            })
             .unwrap_or(members[0]);
         let a = &feed.stops[anchor as usize];
-        let (lat, lon) = if a.lat.is_finite() {
+        let (lat, lon) = if a.lat.is_finite() && a.lon.is_finite() {
             (a.lat, a.lon)
         } else {
+            // The mean of the members that have a position. A station whose
+            // stops have none keeps NaN: it has no place on the map and no
+            // walk links, rather than a made-up one.
             let pts: Vec<_> = members
                 .iter()
                 .map(|&m| &feed.stops[m as usize])
-                .filter(|s| s.lat.is_finite())
+                .filter(|s| s.lat.is_finite() && s.lon.is_finite())
                 .collect();
-            let k = pts.len().max(1) as f64;
-            (
-                pts.iter().map(|s| s.lat).sum::<f64>() / k,
-                pts.iter().map(|s| s.lon).sum::<f64>() / k,
-            )
+            if pts.is_empty() {
+                (f64::NAN, f64::NAN)
+            } else {
+                let k = pts.len() as f64;
+                (
+                    pts.iter().map(|s| s.lat).sum::<f64>() / k,
+                    pts.iter().map(|s| s.lon).sum::<f64>() / k,
+                )
+            }
         };
         let id = dhid_station_prefix(&a.id).unwrap_or(&a.id).to_string();
         for &m in members {
@@ -259,32 +315,54 @@ pub fn cluster(feed: &Feed, cfg: &ClusterConfig) -> Clustering {
                 .collect(),
         });
     }
-    // Entrances and nodes inherit their root's station when it has one.
-    for i in 0..n as StopIdx {
-        if station_of_stop[i as usize] == u32::MAX {
-            let r = uf.find(i);
-            if let Some(&m) = groups.get(&r).and_then(|g| g.first()) {
-                station_of_stop[i as usize] = station_of_stop[m as usize];
-            }
-        }
-    }
+    debug_assert!(station_of_stop.iter().all(|&x| x != u32::MAX));
 
+    let (ambiguities, ambiguity_counts, scan_complete) = ambiguities(&stations, cfg);
     Clustering {
-        ambiguities: ambiguities(&stations, cfg),
+        ambiguities,
+        ambiguity_counts,
+        complete: complete && scan_complete,
         stations,
         station_of_stop,
     }
 }
 
-fn ambiguities(stations: &[Station], cfg: &ClusterConfig) -> Vec<Ambiguity> {
+/// Ambiguous pairs: samples, counts by kind, and whether the scans finished.
+fn ambiguities(
+    stations: &[Station],
+    cfg: &ClusterConfig,
+) -> (Vec<Ambiguity>, AmbiguityCounts, bool) {
     let mut out = Vec::new();
+    let mut counts = AmbiguityCounts::default();
+    let mut checks: u64 = 0;
+    let mut complete = true;
+    let mut record = |a: Ambiguity, out: &mut Vec<Ambiguity>| {
+        match a.kind {
+            "same_name_far_apart" => counts.same_name_far_apart += 1,
+            _ => counts.different_names_close += 1,
+        }
+        if out.len() < MAX_AMBIGUITY_SAMPLES {
+            out.push(a);
+        }
+    };
+
     let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, s) in stations.iter().enumerate() {
-        by_name.entry(normalise_name(&s.name)).or_default().push(i);
+        if s.lat.is_finite() && s.lon.is_finite() {
+            by_name.entry(normalise_name(&s.name)).or_default().push(i);
+        }
     }
-    for group in by_name.values() {
+    let mut names: Vec<&String> = by_name.keys().collect();
+    names.sort();
+    'same: for name in names {
+        let group = &by_name[name];
         for (k, &a) in group.iter().enumerate() {
             for &b in &group[k + 1..] {
+                checks += 1;
+                if checks > PAIR_CHECK_BUDGET {
+                    complete = false;
+                    break 'same;
+                }
                 let d = distance_m(
                     stations[a].lat,
                     stations[a].lon,
@@ -292,42 +370,59 @@ fn ambiguities(stations: &[Station], cfg: &ClusterConfig) -> Vec<Ambiguity> {
                     stations[b].lon,
                 );
                 if d > cfg.ambiguous_same_name_m {
-                    out.push(ambiguity("same_name_far_apart", stations, a, b, d));
+                    record(
+                        ambiguity("same_name_far_apart", stations, a, b, d),
+                        &mut out,
+                    );
                 }
             }
         }
     }
+
     // Different names very close: grid buckets of about the threshold size.
     let cell = cfg.ambiguous_close_m / 111_000.0;
     let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for (i, s) in stations.iter().enumerate() {
-        if s.lat.is_finite() {
+        if s.lat.is_finite() && s.lon.is_finite() {
             grid.entry(((s.lat / cell) as i64, (s.lon / cell) as i64))
                 .or_default()
                 .push(i);
         }
     }
-    for (i, s) in stations.iter().enumerate() {
-        if !s.lat.is_finite() {
+    let mut checks: u64 = 0;
+    'close: for (i, s) in stations.iter().enumerate() {
+        if !(s.lat.is_finite() && s.lon.is_finite()) {
             continue;
         }
+        let name_i = normalise_name(&s.name);
         let (gy, gx) = ((s.lat / cell) as i64, (s.lon / cell) as i64);
         for dy in -1..=1 {
             for dx in -2..=2 {
                 for &j in grid.get(&(gy + dy, gx + dx)).into_iter().flatten() {
-                    if j <= i || normalise_name(&stations[j].name) == normalise_name(&s.name) {
+                    if j <= i {
+                        continue;
+                    }
+                    checks += 1;
+                    if checks > PAIR_CHECK_BUDGET {
+                        complete = false;
+                        break 'close;
+                    }
+                    if normalise_name(&stations[j].name) == name_i {
                         continue;
                     }
                     let d = distance_m(s.lat, s.lon, stations[j].lat, stations[j].lon);
                     if d < cfg.ambiguous_close_m {
-                        out.push(ambiguity("different_names_close", stations, i, j, d));
+                        record(
+                            ambiguity("different_names_close", stations, i, j, d),
+                            &mut out,
+                        );
                     }
                 }
             }
         }
     }
     out.sort_by(|a, b| a.kind.cmp(b.kind).then(a.stations.cmp(&b.stations)));
-    out
+    (out, counts, complete)
 }
 
 fn ambiguity(kind: &'static str, s: &[Station], a: usize, b: usize, d: f64) -> Ambiguity {
@@ -461,6 +556,54 @@ mod tests {
             c.station_of_stop[f.stop_index["E"] as usize],
             c.station_of_stop[f.stop_index["P"] as usize]
         );
+    }
+
+    #[test]
+    fn a_stop_without_station_still_gets_one() {
+        // An entrance with no parent, used by a trip: invalid GTFS, but it
+        // must not leave a stop without a station.
+        let f = load(
+            "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n\
+             S1a,One,48.1,11.5,0,\nS2a,Two,48.11,11.51,0,\nE,Gate,48.12,11.52,2,\n",
+        );
+        let c = cluster(&f, &ClusterConfig::default());
+        assert!(
+            c.station_of_stop
+                .iter()
+                .all(|&s| (s as usize) < c.stations.len())
+        );
+    }
+
+    #[test]
+    fn a_station_without_coordinates_has_no_position() {
+        let f = load(
+            "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n\
+             P,Nowhere,,,1,\nP1,Nowhere 1,,,0,P\nS1a,One,48.1,11.5,0,\nS2a,Two,48.11,11.51,0,\n",
+        );
+        let c = cluster(&f, &ClusterConfig::default());
+        let p = c.stations.iter().find(|s| s.id == "P").unwrap();
+        assert!(
+            p.lat.is_nan() && p.lon.is_nan(),
+            "got ({}, {})",
+            p.lat,
+            p.lon
+        );
+    }
+
+    #[test]
+    fn ambiguity_samples_are_capped_but_counted() {
+        let mut stops = String::from(
+            "stop_id,stop_name,stop_lat,stop_lon\nS1a,One,48.0,11.0\nS2a,Two,48.01,11.01\n",
+        );
+        for i in 0..60 {
+            stops.push_str(&format!("X{i},Name {i},48.2,11.6\n"));
+        }
+        let f = load(&stops);
+        let c = cluster(&f, &ClusterConfig::default());
+        // 60 differently named stops at one point: 60 * 59 / 2 close pairs.
+        assert_eq!(c.ambiguity_counts.different_names_close, 1770);
+        assert_eq!(c.ambiguities.len(), MAX_AMBIGUITY_SAMPLES.min(1770));
+        assert!(c.complete);
     }
 
     #[test]
