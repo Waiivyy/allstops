@@ -67,3 +67,42 @@ fn bounds_and_greedy_bracket_the_optimum() {
         "generator produces too few feasible instances"
     );
 }
+
+/// The same brackets on networks where some hops and dwells take no time,
+/// so several connections happen at the same instant (positive change and
+/// walk times keep their order unambiguous).
+#[test]
+fn bounds_hold_with_instant_hops() {
+    let mut feasible = 0;
+    for seed in 0..cases() {
+        let net = random::network_with(seed + 1_000_000, 7, true);
+        net.validate().unwrap();
+        let Some(opt) = optimum(&net) else { continue };
+        feasible += 1;
+        if let Some(b) = lower_bound(&net, opt) {
+            assert!(
+                b.seconds <= opt,
+                "seed {seed}: static bound {} > optimum {opt}",
+                b.seconds
+            );
+        }
+        if let Some(b) = profile_lower_bound(&net, opt) {
+            assert!(
+                b.seconds <= opt,
+                "seed {seed}: profile bound {} > optimum {opt}",
+                b.seconds
+            );
+        }
+        let mut csa = Csa::new(&net);
+        for &s in &net.targets {
+            if let Some(p) = greedy(&mut csa, s, net.window_start) {
+                let (first, last) = p.duration(&net).expect("greedy plans visit every target");
+                assert!(last - first >= opt, "seed {seed}: greedy beats the optimum");
+            }
+        }
+    }
+    assert!(
+        feasible > cases() / 4,
+        "generator produces too few feasible instances"
+    );
+}

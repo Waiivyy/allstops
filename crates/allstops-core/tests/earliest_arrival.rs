@@ -179,7 +179,9 @@ fn spec() -> impl Strategy<Value = Spec> {
         let n32 = n as u32;
         let line = (
             proptest::collection::vec(0..n32, 2..6),
-            proptest::collection::vec(30i32..400, 6),
+            // Hop times include 0: real feeds round to whole minutes, so
+            // consecutive stops often share a time.
+            proptest::collection::vec(prop_oneof![1 => Just(0i32), 3 => 30i32..400], 6),
             0i32..1800,
             120i32..900,
             proptest::bool::weighted(0.8),

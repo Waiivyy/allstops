@@ -260,6 +260,13 @@ pub mod random {
     /// several trips each in both directions, an occasional connector line
     /// and a few walk links. Every station on a metro line is a target.
     pub fn network(seed: u64, max_stations: usize) -> Network {
+        network_with(seed, max_stations, false)
+    }
+
+    /// Like [`network`], and with `instant_hops` some hops and dwells take
+    /// no time, as in real feeds that round to whole minutes, so several
+    /// connections share one instant.
+    pub fn network_with(seed: u64, max_stations: usize, instant_hops: bool) -> Network {
         let mut r = Lcg::new(seed);
         let n = 3 + r.below((max_stations.max(3) - 2) as u64) as usize;
         let change = 30 + r.below(120) as i32;
@@ -290,7 +297,15 @@ pub mod random {
             if seq.len() < 2 {
                 continue;
             }
-            let hops: Vec<i32> = (0..seq.len()).map(|_| 60 + r.below(300) as i32).collect();
+            let hops: Vec<i32> = (0..seq.len())
+                .map(|_| {
+                    if instant_hops && r.chance(30) {
+                        0
+                    } else {
+                        60 + r.below(300) as i32
+                    }
+                })
+                .collect();
             let headway = 300 + r.below(900) as i32;
             let first = r.below(1800) as i32;
             for dir in 0..2 {
@@ -303,7 +318,7 @@ pub mod random {
                     let mut t = first + k * headway + dir * 120;
                     let mut calls = Vec::new();
                     for (i, &s) in order.iter().enumerate() {
-                        let dwell = 20;
+                        let dwell = if instant_hops && r.chance(50) { 0 } else { 20 };
                         calls.push(Call {
                             stop: s,
                             station: s,
