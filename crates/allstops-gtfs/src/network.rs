@@ -105,7 +105,16 @@ pub fn build_network(
     let mut trips_added = 0;
     for delta in -1..=1i64 {
         let day = date + chrono::Duration::days(delta);
-        let offset = day_offset(&tz, date, day);
+        let Some(offset) = day_offset(&tz, date, day) else {
+            if delta == 0 {
+                return Err(Error::DateNotInTimeZone {
+                    date,
+                    tz: tz.name().to_string(),
+                });
+            }
+            // A neighbouring date the time zone skipped has no service day.
+            continue;
+        };
         let day_str = day.format("%Y-%m-%d").to_string();
         for (ti, trip) in feed.trips.iter().enumerate() {
             let route = &feed.routes[trip.route as usize];
@@ -279,6 +288,44 @@ fn add_footpaths(network: &mut Network, rules: &Rules) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plan_date_the_time_zone_skipped_is_an_error_not_a_panic() {
+        use crate::calendar::ServiceCalendar;
+        use crate::cluster::{ClusterConfig, cluster};
+        use crate::fixture::minimal_with;
+        // Samoa skipped 2011-12-30 when it moved across the date line.
+        let feed = crate::Feed::from_zip_bytes(
+            &minimal_with(&[
+                (
+                    "agency.txt",
+                    "agency_id,agency_name,agency_url,agency_timezone\nA,Agency,https://example.org,Pacific/Apia\n",
+                ),
+                (
+                    "calendar.txt",
+                    "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n\
+                     WD,1,1,1,1,1,1,1,20111201,20120131\n",
+                ),
+            ]),
+            &crate::Limits::default(),
+        )
+        .unwrap();
+        let cal = ServiceCalendar::new(&feed);
+        let c = cluster(&feed, &ClusterConfig::default());
+        let targets: Vec<u32> = vec![c.station_of_stop[feed.stop_index["S1a"] as usize]];
+        for (d, ok) in [
+            ("2011-12-29", true),
+            ("2011-12-30", false),
+            ("2011-12-31", true),
+        ] {
+            let rules = Rules {
+                date: d.into(),
+                ..Rules::default()
+            };
+            let r = build_network(&feed, &cal, &c, &targets, &[1..=1], &rules);
+            assert_eq!(r.is_ok(), ok, "{d}: {:?}", r.err());
+        }
+    }
 
     #[test]
     fn walk_times_follow_the_rules() {

@@ -215,7 +215,17 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
         push("BAD_DATE", None, format!("bad plan date {:?}", it.date));
         return finish(v, None, 0);
     };
-    let plan_origin = service_day_origin(&tz, plan_date);
+    let Some(plan_origin) = service_day_origin(&tz, plan_date) else {
+        push(
+            "BAD_DATE",
+            None,
+            format!(
+                "plan date {plan_date} does not exist in time zone {}",
+                tz.name()
+            ),
+        );
+        return finish(v, None, 0);
+    };
     let r = &it.rules;
     if r.stay_aboard_through_terminus {
         push(
@@ -366,7 +376,18 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                         format!("no drop-off at {alight_stop_id}"),
                     );
                 }
-                let origin = service_day_origin(&tz, sd);
+                let Some(origin) = service_day_origin(&tz, sd) else {
+                    push(
+                        "BAD_DATE",
+                        li_,
+                        format!(
+                            "service date {sd} does not exist in time zone {}",
+                            tz.name()
+                        ),
+                    );
+                    place = None;
+                    continue;
+                };
                 let start = origin + i64::from(rows[bi].departure);
                 let end = origin + i64::from(rows[ai].arrival);
                 let board_station = station_id_of_stop(rows[bi].stop);

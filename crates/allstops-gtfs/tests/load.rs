@@ -42,7 +42,7 @@ fn trips_past_midnight_keep_their_service_day() {
     assert_eq!(st[1].arrival, 24 * 3600 + 5 * 60 + 30);
     // Friday 2026-10-09 service, arriving after midnight: the absolute time
     // is early Saturday morning, counted from Friday's origin.
-    let origin = service_day_origin(&Berlin, date("2026-10-09"));
+    let origin = service_day_origin(&Berlin, date("2026-10-09")).unwrap();
     let abs = Berlin
         .timestamp_opt(origin + st[1].arrival as i64, 0)
         .unwrap();
@@ -90,7 +90,7 @@ fn calendar_dates_only_feed_is_accepted() {
 fn daylight_saving_days_use_noon_minus_twelve_hours() {
     // Autumn change in Europe/Berlin: 2026-10-25, clocks go back at 03:00.
     // The day is 25 hours long; noon minus 12 h is 01:00 local (CEST).
-    let o = service_day_origin(&Berlin, date("2026-10-25"));
+    let o = service_day_origin(&Berlin, date("2026-10-25")).unwrap();
     let at = |secs: i64| Berlin.timestamp_opt(o + secs, 0).unwrap();
     assert_eq!(at(0).hour(), 1);
     // A trip at 05:00:00 on that service day departs at 05:00 wall time
@@ -98,7 +98,7 @@ fn daylight_saving_days_use_noon_minus_twelve_hours() {
     assert_eq!((at(5 * 3600).hour(), at(5 * 3600).minute()), (5, 0));
     // Spring change: 2026-03-29, clocks jump from 02:00 to 03:00. Noon minus
     // 12 h is 23:00 on the previous day.
-    let o = service_day_origin(&Berlin, date("2026-03-29"));
+    let o = service_day_origin(&Berlin, date("2026-03-29")).unwrap();
     let at = |secs: i64| Berlin.timestamp_opt(o + secs, 0).unwrap();
     assert_eq!(at(0).date_naive(), date("2026-03-28"));
     assert_eq!(at(0).hour(), 23);
@@ -107,19 +107,19 @@ fn daylight_saving_days_use_noon_minus_twelve_hours() {
     // Origins are noon minus 12 h, so the 25-hour wall-clock day sits
     // between the origins of 24 and 25 October.
     assert_eq!(
-        day_offset(&Berlin, date("2026-10-25"), date("2026-10-24")),
+        day_offset(&Berlin, date("2026-10-25"), date("2026-10-24")).unwrap(),
         -25 * 3600
     );
     assert_eq!(
-        day_offset(&Berlin, date("2026-10-26"), date("2026-10-25")),
+        day_offset(&Berlin, date("2026-10-26"), date("2026-10-25")).unwrap(),
         -24 * 3600
     );
     assert_eq!(
-        day_offset(&Berlin, date("2026-03-29"), date("2026-03-28")),
+        day_offset(&Berlin, date("2026-03-29"), date("2026-03-28")).unwrap(),
         -23 * 3600
     );
     assert_eq!(
-        day_offset(&Berlin, date("2026-11-14"), date("2026-11-13")),
+        day_offset(&Berlin, date("2026-11-14"), date("2026-11-13")).unwrap(),
         -24 * 3600
     );
 }
@@ -127,7 +127,7 @@ fn daylight_saving_days_use_noon_minus_twelve_hours() {
 #[test]
 fn absolute_wall_clock_on_autumn_change() {
     // 05:00:00 on 2026-10-25 is 05:00 CET = 04:00 UTC.
-    let o = service_day_origin(&Berlin, date("2026-10-25"));
+    let o = service_day_origin(&Berlin, date("2026-10-25")).unwrap();
     let utc = chrono::DateTime::from_timestamp(o + 5 * 3600, 0).unwrap();
     assert_eq!(utc.hour(), 4);
     let local = utc.with_timezone(&Berlin);

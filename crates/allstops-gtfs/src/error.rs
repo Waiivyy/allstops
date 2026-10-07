@@ -35,6 +35,9 @@ pub enum Error {
 
     #[error("unknown time zone {0:?} in agency.txt")]
     TimeZone(String),
+
+    #[error("date {date} does not exist in time zone {tz}")]
+    DateNotInTimeZone { date: chrono::NaiveDate, tz: String },
 }
 
 /// Which input limit a feed broke. See [`crate::Limits`].

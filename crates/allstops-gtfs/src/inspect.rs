@@ -242,7 +242,7 @@ pub fn profile(feed: &Feed) -> Profile {
     let mut without_days = 0;
     for t in &feed.trips {
         let runs = *service_days.entry(t.service).or_insert_with(|| {
-            validity_range.is_some_and(|(s, e)| cal.active_days(t.service, s, e) > 0)
+            validity_range.is_some_and(|(s, e)| cal.runs_between(t.service, s, e))
         });
         if !runs {
             without_days += 1;
