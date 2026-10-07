@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use allstops_core::bound::{lower_bound, profile_lower_bound};
 use allstops_core::itinerary::to_itinerary;
 
-use crate::check::{check_json, print_report};
+use crate::check::{check_json, print_report, rules_for_verifier};
 use crate::plan_input::{PlanArgs, load};
 use crate::{Outcome, style};
 
@@ -131,6 +131,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         &input.feed,
         &input.clustering,
         &input.selection,
+        Some(&rules_for_verifier(&input.rules)?),
         Some(&input.feed_sha256),
         &doc,
     )?;

@@ -194,9 +194,11 @@ fn check_json(
     feed: &Feed,
     clustering: &Clustering,
     selection: &Selection,
+    rules: &Rules,
     feed_sha256: Option<&str>,
     json: &str,
 ) -> Result<Report> {
+    let expected: allstops_verify::RulesIn = serde_json::from_value(serde_json::to_value(rules)?)?;
     let cal = ServiceCalendar::new(feed);
     let targets: Vec<String> = select(feed, clustering, selection)?
         .into_iter()
@@ -210,6 +212,7 @@ fn check_json(
         targets: &targets,
         visit_types: &types,
         feed_sha256,
+        expected_rules: Some(&expected),
     };
     let it = parse(json)?;
     Ok(verify(&ctx, &it))
@@ -227,7 +230,14 @@ fn verify_route(
     let it = to_itinerary(net, &best.plan, rules, src.feed_ref.clone(), &src.timezone)
         .context("internal error: a greedy plan does not visit every target")?;
     let json = serde_json::to_string_pretty(&it)?;
-    let report = check_json(&src.feed, clustering, selection, Some(&src.sha256), &json)?;
+    let report = check_json(
+        &src.feed,
+        clustering,
+        selection,
+        rules,
+        Some(&src.sha256),
+        &json,
+    )?;
     Ok((it, report))
 }
 

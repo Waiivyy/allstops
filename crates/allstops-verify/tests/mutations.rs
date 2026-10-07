@@ -22,7 +22,8 @@ fn feed_with_transfers(transfers: &str) -> Feed {
                  B,Bravo,48.0950,11.5000,1,\nB1,Bravo,48.0950,11.5000,0,B\n\
                  C,Charlie,48.1000,11.5000,1,\nC1,Charlie 1,48.1000,11.5000,0,C\nC2,Charlie 2,48.1000,11.5001,0,C\n\
                  D,Delta,48.1027,11.5000,1,\nD1,Delta,48.1027,11.5000,0,D\n\
-                 E,Echo,48.1100,11.5000,1,\nE1,Echo,48.1100,11.5000,0,E\n",
+                 E,Echo,48.1100,11.5000,1,\nE1,Echo,48.1100,11.5000,0,E\n\
+                 N,Nowhere,,,1,\nN1,Nowhere 1,,,0,N\n",
             ),
             (
                 "routes.txt",
@@ -93,7 +94,13 @@ fn check(doc: &Value) -> Vec<&'static str> {
 }
 
 fn check_with(doc: &Value, transfers: &str) -> Vec<&'static str> {
+    check_full(doc, transfers, None)
+}
+
+fn check_full(doc: &Value, transfers: &str, expected: Option<Value>) -> Vec<&'static str> {
     let feed = feed_with_transfers(transfers);
+    let expected: Option<allstops_verify::RulesIn> =
+        expected.map(|v| serde_json::from_value(v).expect("rules parse"));
     let cal = ServiceCalendar::new(&feed);
     let c = cluster(&feed, &ClusterConfig::default());
     let sel = Selection {
@@ -116,6 +123,7 @@ fn check_with(doc: &Value, transfers: &str) -> Vec<&'static str> {
         targets: &targets,
         visit_types: &[1..=1],
         feed_sha256: Some("abc"),
+        expected_rules: expected.as_ref(),
     };
     let it = parse(&doc.to_string()).expect("parses");
     let mut codes = verify(&ctx, &it).codes();
@@ -346,4 +354,71 @@ fn minimum_times_apply_across_a_walk() {
     assert_eq!(check_with(&valid(), &enough), Vec::<&str>::new());
     let banned = format!("{T_HEADER}C,D,,,,,3,\n");
     assert_eq!(check_with(&valid(), &banned), vec!["FORBIDDEN_TRANSFER"]);
+}
+
+// ---- walks, waits, start and end, rules ---------------------------------
+
+#[test]
+fn a_walk_from_a_station_to_itself_is_rejected() {
+    let mut d = valid();
+    d["legs"] = json!([
+        ride("T1", "A1", "08:00:00", "C1", "08:10:00", &["A", "B", "C"]),
+        {"type": "walk", "from_station": "C", "to_station": "C", "start": "08:10:00", "end": "08:12:00"},
+        ride("T5", "C2", "08:20:00", "D1", "08:25:00", &["C", "D"]),
+        ride("T6", "D1", "08:30:00", "E1", "08:35:00", &["D", "E"]),
+    ]);
+    assert_eq!(check_with(&d, T_HEADER), vec!["WALK_SAME_STATION"]);
+}
+
+#[test]
+fn a_wait_moves_the_clock_on() {
+    let mut d = valid();
+    d["legs"][2]["end"] = json!("09:45:00");
+    assert_eq!(check(&d), vec!["TIME_TRAVEL"]);
+}
+
+#[test]
+fn a_walk_to_a_station_without_coordinates_is_rejected() {
+    let mut d = valid();
+    d["legs"][1]["to_station"] = json!("N");
+    let codes = check(&d);
+    assert!(codes.contains(&"WALK_UNMEASURABLE"), "{codes:?}");
+}
+
+#[test]
+fn start_and_end_rules_are_checked() {
+    let mut d = valid();
+    d["rules"]["start"] = json!("A");
+    d["rules"]["end"] = json!("E");
+    assert_eq!(check(&d), Vec::<&str>::new());
+    d["rules"]["start"] = json!("B");
+    assert_eq!(check(&d), vec!["START_MISMATCH"]);
+    d["rules"]["start"] = json!("A");
+    d["rules"]["end"] = json!("A");
+    assert_eq!(check(&d), vec!["END_MISMATCH"]);
+}
+
+#[test]
+fn nonsense_rules_are_rejected() {
+    let mut d = valid();
+    d["rules"]["walking_speed_kmh"] = json!(-1.0);
+    assert_eq!(check(&d), vec!["BAD_RULES"]);
+    let mut d = valid();
+    d["rules"]["min_transfer_s"]["same_station"] = json!(0);
+    assert_eq!(check(&d), vec!["BAD_RULES"]);
+}
+
+#[test]
+fn pinned_rules_must_match_and_are_the_ones_checked() {
+    assert_eq!(
+        check_full(&valid(), DEFAULT_TRANSFERS, Some(rules())),
+        Vec::<&str>::new()
+    );
+    let mut slow = rules();
+    slow["walking_speed_kmh"] = json!(1.0);
+    // Under the pinned rules the 300 m walk needs over 23 minutes.
+    assert_eq!(
+        check_full(&valid(), DEFAULT_TRANSFERS, Some(slow)),
+        vec!["RULES_MISMATCH", "WALK_TOO_FAST"]
+    );
 }

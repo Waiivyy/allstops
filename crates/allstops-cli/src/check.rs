@@ -1,18 +1,26 @@
 //! Run the independent verifier on an itinerary before anything is shown.
 
+use allstops_core::rules::Rules;
 use allstops_gtfs::calendar::ServiceCalendar;
 use allstops_gtfs::cluster::Clustering;
 use allstops_gtfs::feed::Feed;
 use allstops_gtfs::select::{Selection, select};
-use allstops_verify::{Context, Report, parse, verify};
+use allstops_verify::{Context, Report, RulesIn, parse, verify};
 use anyhow::Result;
 
 use crate::plan_input::visit_types;
+
+/// The verifier's view of a rules value: the same fields, read through its
+/// own types, so the verifier never depends on the solver's.
+pub fn rules_for_verifier(rules: &Rules) -> Result<RulesIn> {
+    Ok(serde_json::from_value(serde_json::to_value(rules)?)?)
+}
 
 pub fn check_json(
     feed: &Feed,
     clustering: &Clustering,
     selection: &Selection,
+    expected_rules: Option<&RulesIn>,
     feed_sha256: Option<&str>,
     json: &str,
 ) -> Result<Report> {
@@ -29,6 +37,7 @@ pub fn check_json(
         targets: &targets,
         visit_types: &types,
         feed_sha256,
+        expected_rules,
     };
     let it = parse(json)?;
     Ok(verify(&ctx, &it))

@@ -40,16 +40,26 @@ pub struct FeedRef {
     pub sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct MinTransfer {
     pub same_station: i64,
     pub walk_link: i64,
 }
 
-#[derive(Debug, Deserialize)]
+fn any() -> String {
+    "any".into()
+}
+
+/// The rules fields the verifier checks. Other fields of the itinerary's
+/// rules are ignored.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RulesIn {
     pub earliest_start: String,
     pub latest_end: String,
+    #[serde(default = "any")]
+    pub start: String,
+    #[serde(default = "any")]
+    pub end: String,
     pub allow_walking: bool,
     pub walking_speed_kmh: f64,
     pub walk_detour_factor: f64,
@@ -127,6 +137,10 @@ pub struct Context<'a> {
     pub visit_types: &'a [RangeInclusive<u16>],
     /// SHA-256 of the feed bytes, when known.
     pub feed_sha256: Option<&'a str>,
+    /// The rules the caller requires. When given, the itinerary's embedded
+    /// rules must match them (RULES_MISMATCH otherwise) and these are the
+    /// rules checked; when absent, the embedded rules are checked.
+    pub expected_rules: Option<&'a RulesIn>,
 }
 
 /// GTFS route types for a connector mode name (basic and extended types).
@@ -163,7 +177,9 @@ fn clock(s: &str) -> Option<i64> {
 #[derive(Clone)]
 struct Place {
     station: String,
-    time: i64,
+    /// Latest time accounted for, including waits; nothing may start earlier.
+    /// Change times count from the last alighting instead.
+    clock: i64,
     /// Stop, trip key (`trip@date`) and trip of the last ride, if the
     /// previous movement was a ride.
     alight: Option<(u32, String, u32)>,
@@ -324,7 +340,44 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
         );
         return finish(v, None, 0);
     };
-    let r = &it.rules;
+    let r: &RulesIn = match ctx.expected_rules {
+        Some(expected) => {
+            if *expected != it.rules {
+                push(
+                    "RULES_MISMATCH",
+                    None,
+                    "the itinerary was planned under different rules than the ones required".into(),
+                );
+            }
+            expected
+        }
+        None => &it.rules,
+    };
+    // Rules that make the checks meaningless are themselves a violation.
+    if !(r.walking_speed_kmh.is_finite() && r.walking_speed_kmh > 0.0) {
+        push(
+            "BAD_RULES",
+            None,
+            "walking_speed_kmh must be above 0".into(),
+        );
+    }
+    if !(r.walk_detour_factor.is_finite() && r.walk_detour_factor >= 1.0) {
+        push(
+            "BAD_RULES",
+            None,
+            "walk_detour_factor must be at least 1".into(),
+        );
+    }
+    if !(r.max_walk_m.is_finite() && r.max_walk_m >= 0.0) {
+        push("BAD_RULES", None, "max_walk_m must be 0 or more".into());
+    }
+    if r.min_transfer_s.same_station < 1 || r.min_transfer_s.walk_link < 1 {
+        push(
+            "BAD_RULES",
+            None,
+            "minimum transfer times must be at least 1 second".into(),
+        );
+    }
     if r.stay_aboard_through_terminus {
         push(
             "RULE_UNSUPPORTED",
@@ -491,7 +544,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                             ),
                         );
                     }
-                    if start < p.time {
+                    if start < p.clock {
                         push(
                             "TIME_TRAVEL",
                             li_,
@@ -567,7 +620,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                 }
                 place = Some(Place {
                     station: station_id_of_stop(rows[ai].stop),
-                    time: end,
+                    clock: end,
                     alight: Some((rows[ai].stop, format!("{trip_id}@{service_date}"), ti)),
                     last_alight: Some((rows[ai].stop, ti, end)),
                     after_walk: false,
@@ -604,6 +657,13 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                     place = None;
                     continue;
                 };
+                if a == b {
+                    push(
+                        "WALK_SAME_STATION",
+                        li_,
+                        format!("a walk from {from_station} to itself"),
+                    );
+                }
                 if let Some(p) = &place {
                     if p.after_walk {
                         push("WALK_CHAINED", li_, "two walks in a row".into());
@@ -618,7 +678,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                             ),
                         );
                     }
-                    if s < p.time {
+                    if s < p.clock {
                         push(
                             "TIME_TRAVEL",
                             li_,
@@ -629,7 +689,13 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                 let last_alight = place.as_ref().and_then(|p| p.last_alight);
                 let (sa, sb) = (&ctx.clustering.stations[a], &ctx.clustering.stations[b]);
                 let d = distance_m(sa.lat, sa.lon, sb.lat, sb.lon);
-                if d > r.max_walk_m + 0.5 {
+                if !d.is_finite() {
+                    push(
+                        "WALK_UNMEASURABLE",
+                        li_,
+                        format!("{from_station} or {to_station} has no coordinates"),
+                    );
+                } else if d > r.max_walk_m + 0.5 {
                     push(
                         "WALK_TOO_LONG",
                         li_,
@@ -639,7 +705,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                 let speed = r.walking_speed_kmh / 3.6;
                 let need = ((d * r.walk_detour_factor / speed).ceil() as i64)
                     .max(r.min_transfer_s.walk_link);
-                if e - s < need {
+                if d.is_finite() && e - s < need {
                     push(
                         "WALK_TOO_FAST",
                         li_,
@@ -648,7 +714,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                 }
                 place = Some(Place {
                     station: to_station.clone(),
-                    time: e,
+                    clock: e,
                     alight: None,
                     last_alight,
                     after_walk: true,
@@ -675,15 +741,17 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                             format!("waiting at {station} but the runner is at {}", p.station),
                         );
                     }
-                    if s < p.time {
+                    if s < p.clock {
                         push(
                             "TIME_TRAVEL",
                             li_,
                             "wait starts before the previous leg ends".into(),
                         );
                     }
-                    // A wait keeps the place and arrival state; it only
-                    // advances the clock for contiguity, not for transfers.
+                    // A wait keeps the place and the arrival state used for
+                    // change times, and moves the clock on: nothing after
+                    // it may start before it ends.
+                    p.clock = p.clock.max(e);
                 }
             }
         }
@@ -740,6 +808,30 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                 "BAD_RULES",
                 None,
                 "unreadable earliest_start or latest_end".into(),
+            );
+        }
+        let earliest: Vec<&String> = ctx
+            .targets
+            .iter()
+            .filter(|t| visited.get(*t) == Some(&first))
+            .collect();
+        if r.start != "any" && !earliest.iter().any(|t| **t == r.start) {
+            push(
+                "START_MISMATCH",
+                None,
+                format!("the first visit is not at the start station {}", r.start),
+            );
+        }
+        let latest: Vec<&String> = ctx
+            .targets
+            .iter()
+            .filter(|t| visited.get(*t) == Some(&last))
+            .collect();
+        if r.end != "any" && !latest.iter().any(|t| **t == r.end) {
+            push(
+                "END_MISMATCH",
+                None,
+                format!("the last visit is not at the end station {}", r.end),
             );
         }
         let d = last - first;
