@@ -24,6 +24,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
     let bytes =
         std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
     let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
+    let attribution = crate::plan_input::feed_ref(&bytes, &feed).attribution;
     let c = cluster(&feed, &ClusterConfig::default());
 
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
@@ -83,6 +84,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
                 "ambiguity_counts": c.ambiguity_counts,
                 "ambiguity_samples": c.ambiguities,
                 "clustering_complete": c.complete,
+                "attribution": attribution,
                 "selection": sel,
             }))?
         );
@@ -118,5 +120,6 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
             println!("  {:<24} {}", s.id, s.name);
         }
     }
+    println!("{}", style::dim(&attribution));
     Ok(Outcome::Ok)
 }

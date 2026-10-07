@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use allstops_core::csa::{Csa, JLeg};
 use allstops_core::network::{Network, StationIdx, Time};
-use allstops_core::plan::{Best, greedy_from, greedy_jobs, shortest, visits};
+use allstops_core::plan::{
+    Best, Change, greedy_from, greedy_jobs, shortest, transfer_slacks, visits,
+};
 use allstops_core::rules::parse_clock;
 use anyhow::{Result, bail};
 use rayon::prelude::*;
@@ -38,6 +40,8 @@ pub fn best_greedy(net: &Network, starts: &[StationIdx], times: &[Time]) -> (Opt
         .collect();
     shortest(results)
 }
+
+pub const SAFETY_NOTE: &str = "Planned from the published timetable. Real trains run late. Check official sources and ride safely.";
 
 pub fn hm(t: Time) -> String {
     let t = t.max(0);
@@ -150,6 +154,13 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
             report.duration_s
         );
     }
+    // Changes between rides and how much time each leaves to spare.
+    let changes = transfer_slacks(net, &best.plan);
+    let tight: Vec<&Change> = changes
+        .iter()
+        .filter(|c| c.slack < input.rules.tight_transfer_s)
+        .collect();
+    let least_spare = changes.iter().map(|c| c.slack).min();
     if let Some(out) = &args.out {
         std::fs::write(out, &doc)?;
         eprintln!("{} {}", style::dim("wrote"), out.display());
@@ -199,6 +210,17 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
                 "profile_bound_s": profile_bound.as_ref().map(|b| b.seconds),
                 "profile_bound_ms": profile_ms.round(),
                 "verified": true,
+                "changes": changes.len(),
+                "tight_transfer_s": input.rules.tight_transfer_s,
+                "tight_changes": tight.iter().map(|c| serde_json::json!({
+                    "station": net.stations[c.station as usize].name,
+                    "leg": c.leg,
+                    "after_walk": c.walked,
+                    "spare_s": c.slack,
+                })).collect::<Vec<_>>(),
+                "least_spare_s": least_spare,
+                "attribution": itinerary.feed.attribution,
+                "note": SAFETY_NOTE,
                 "build_ms": input.build_ms.round(),
                 "load_ms": input.load_ms.round(),
             }))?
@@ -212,6 +234,26 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         println!("  first visit      {} at {}", first_station, hm(best.first));
         println!("  last visit       {} at {}", last_station, hm(best.last));
         println!("  legs             {rides} rides, {walks} walks");
+        println!(
+            "  changes          {} ({} tight: under {} s to spare beyond the minimum change{})",
+            changes.len(),
+            tight.len(),
+            input.rules.tight_transfer_s,
+            least_spare
+                .map(|s| format!("; least {s} s"))
+                .unwrap_or_default()
+        );
+        for c in &tight {
+            println!(
+                "    {}",
+                style::warn(&format!(
+                    "tight: {} s spare at {}{}",
+                    c.slack,
+                    net.stations[c.station as usize].name,
+                    if c.walked { " after a walk" } else { "" }
+                ))
+            );
+        }
         match (lb, gap) {
             (Some(l), Some(g)) => println!("  lower bound      {} (gap {:.1}%)", dur(l), g * 100.0),
             _ => println!("  lower bound      none (targets not connected)"),
@@ -236,12 +278,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
             style::dim("Times are service-day clock times (may exceed 24:00).")
         );
         println!("{}", style::dim(&itinerary.feed.attribution));
-        println!(
-            "{}",
-            style::dim(
-                "Planned from the published timetable. Real trains run late. Check official sources and ride safely."
-            )
-        );
+        println!("{}", style::dim(SAFETY_NOTE));
     }
     Ok(Outcome::Ok)
 }

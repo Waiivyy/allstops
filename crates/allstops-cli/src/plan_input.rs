@@ -73,35 +73,28 @@ pub fn visit_types(feed: &Feed, sel: &Selection) -> Result<Vec<RangeInclusive<u1
         .collect())
 }
 
-pub fn load(args: &PlanArgs) -> Result<PlanInput> {
-    let (rules, selection) = load_rules(&args.rules, args.date.as_deref())?;
-    let t0 = Instant::now();
-    let bytes =
-        std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
-    let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
-    let load_ms = t0.elapsed().as_secs_f64() * 1e3;
-    let feed_sha256 = crate::cmd_fetch::sha256_hex(&bytes);
+/// Identity and attribution of a feed file: from the registry when this
+/// exact file is pinned there, otherwise crediting the publisher named in
+/// the feed.
+pub fn feed_ref(bytes: &[u8], feed: &Feed) -> allstops_core::itinerary::FeedRef {
+    let sha256 = crate::cmd_fetch::sha256_hex(bytes);
     let feed_version = feed
         .feed_info
         .as_ref()
         .map(|f| f.version.clone())
         .unwrap_or_default();
-    // Name and attribution from the registry when this exact file is pinned
-    // there; otherwise credit the publisher named in the feed.
     let registered = crate::registry::Registry::load(&crate::default_registry())
         .ok()
-        .and_then(|r| r.feeds.into_iter().find(|f| f.sha256 == feed_sha256));
-    let feed_ref = match registered {
+        .and_then(|r| r.feeds.into_iter().find(|f| f.sha256 == sha256));
+    match registered {
         Some(e) => allstops_core::itinerary::FeedRef {
             attribution: e.render_attribution(&feed_version),
             id: e.id,
-            sha256: feed_sha256.clone(),
-            feed_version: feed_version.clone(),
+            sha256,
+            feed_version,
         },
         None => allstops_core::itinerary::FeedRef {
             id: "unregistered".into(),
-            sha256: feed_sha256.clone(),
-            feed_version: feed_version.clone(),
             attribution: format!(
                 "Timetable data: {}",
                 feed.feed_info
@@ -109,8 +102,21 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
                     .map(|f| f.publisher_name.as_str())
                     .unwrap_or("see the feed's publisher")
             ),
+            sha256,
+            feed_version,
         },
-    };
+    }
+}
+
+pub fn load(args: &PlanArgs) -> Result<PlanInput> {
+    let (rules, selection) = load_rules(&args.rules, args.date.as_deref())?;
+    let t0 = Instant::now();
+    let bytes =
+        std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
+    let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
+    let load_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let feed_ref = feed_ref(&bytes, &feed);
+    let feed_sha256 = feed_ref.sha256.clone();
     let timezone = feed.timezone()?.name().to_string();
     let t1 = Instant::now();
     let clustering = cluster(&feed, &ClusterConfig::default());
