@@ -80,9 +80,10 @@ Odeonsplatz 6). See `docs/RULES.md` for the 96 versus 100 discussion.
 
 ### U-Bahn routes in the feed
 
-`U1` to `U8` plus a route named `U` with 274 trips between Goetheplatz and
-Implerstraße. That is the shuttle train that runs during the 2026 renovation
-works at Poccistraße and Goetheplatz. Several lines serve more stations than
+`U1` to `U8` plus a route named `U` with 274 trips: 272 between Goetheplatz and
+Implerstraße (140 in one direction, 132 in the other) and 2 from
+Brudermühlstraße via Implerstraße to Goetheplatz. That is the shuttle train
+that runs during the 2026 renovation works at Poccistraße and Goetheplatz. Several lines serve more stations than
 their regular route in this feed (U2 serves 36 stations, U8 30), consistent
 with the construction diversions announced by the operator for October and
 November 2026.

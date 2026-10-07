@@ -17,15 +17,16 @@ keeper's own guidelines for an attempt win over this page.
 | `date` | | Plan date, `YYYY-MM-DD`. Must lie inside the feed's validity range. |
 | `earliest_start` | `04:30` | Earliest first visit, as a clock time of the plan date's service day. |
 | `latest_end` | `26:00` | Latest last visit; may pass 24:00 (26:00 is 02:00 the next morning). |
-| `start`, `end` | `"any"` | `"any"` or a station ID the run must start or end at. |
+| `start` | `"any"` | `"any"`, or the ID of a target station where the first visit must be. |
+| `end` | `"any"` | `"any"`, or the ID of the station of the last visit. The verifier checks it; the planner does not support it yet and refuses other values. |
 | `allow_walking` | `true` | Whether walks between stations are allowed. |
 | `walking_speed_kmh` | `4.5` | **Assumption.** Average walking speed. Not a measurement. |
 | `walk_detour_factor` | `1.3` | **Assumption.** Ratio of walked distance to straight-line distance. |
 | `max_walk_m` | `1200` | Longest straight-line distance a single walk may cover. |
 | `connector_modes` | `["tram", "bus"]` | Other scheduled public transport allowed for moving between stations. Riding these never counts as a visit. |
-| `min_transfer_s.same_station` | `60` | **Assumption.** Minimum time between arriving by train and departing on another train at the same station. |
-| `min_transfer_s.walk_link` | `120` | **Assumption.** A walk between two stations never takes less than this. |
-| `tight_transfer_s` | `120` | Transfers with less slack than this are flagged as tight. |
+| `min_transfer_s.same_station` | `60` | **Assumption.** Minimum time between arriving by train and departing on another train at the same station. At least 1 second. |
+| `min_transfer_s.walk_link` | `120` | **Assumption.** A walk between two stations never takes less than this. At least 1 second. |
+| `tight_transfer_s` | `120` | `allstops solve` flags every change with less time than this to spare beyond its minimum. |
 | `count_pass_through` | `false` | Whether a scheduled pass-through (pickup and drop-off both forbidden) counts as a visit. |
 | `stay_aboard_through_terminus` | `false` | Riding through a terminus when the train continues as a new trip (`block_id`). Not supported yet; must be `false`. |
 
@@ -34,14 +35,26 @@ measurements, and a real runner should check them against their own pace and
 the stations on the route. Walk links are straight-line approximations unless
 overridden with measured times (`walks.toml`, planned for Stage 1).
 
+Rules are checked before any work starts, and every problem is reported at
+once: the date must be `YYYY-MM-DD`, the window must end after it starts and
+last at most 48 hours, walking speed must be above 0 and at most 30 km/h, the
+detour factor between 1 and 5, `max_walk_m` between 0 and 10,000, transfer
+minimums between 1 second and one day, and connector modes must be known.
+Transfer minimums must be at least one second because a change or walk taking
+no time would let connections at the same instant chain in an order the
+search does not model.
+
 ## What counts as a visit
 
 The planner, the verifier and every output use one definition:
 
 1. A station is visited when the runner is aboard a trip of a **target mode**
-   (the route types named in the selection, for example `route_type = 1` for
-   a metro) and that trip has a **scheduled stop** there, or when the runner
-   **boards** such a trip there. The runner does not need to get off.
+   and that trip has a **scheduled stop** there, or when the runner **boards**
+   such a trip there. The runner does not need to get off. The target modes are
+   the route types of the routes that the selection's route filters
+   (`route_types`, `agencies`, `route_short_names`) match; a selection that
+   names stations only, without any route filter, is rejected because it does
+   not say which trips count.
 2. A scheduled stop is a `stop_times.txt` row that is not a pass-through. A row
    with `pickup_type = 1` and `drop_off_type = 1` is a pass-through and does
    not count unless `count_pass_through = true`.
@@ -66,13 +79,36 @@ The planner, the verifier and every output use one definition:
   seconds. After a walk the runner can board immediately.
 - **No chained walks:** a walk can follow a ride or the start of the run, never
   another walk. Otherwise several short walks could add up to a walk longer
-  than `max_walk_m`.
-- **Forbidden transfers** in `transfers.txt` (`transfer_type = 3`) are never
-  used, including across a walk. Minimum transfer times in `transfers.txt`
-  (`transfer_type = 2`) raise the same-station minimum when larger.
+  than `max_walk_m`. A walk goes between two different stations that both
+  have coordinates.
+- **Waits** keep the runner at a station; nothing after a wait may start
+  before it ends.
+- **The last ride** ends at a stop where alighting is allowed. When the last
+  target is reached aboard a train that does not let passengers off there,
+  the ride continues to the next stop that does; the total time is unchanged.
+- **transfers.txt** is applied as the GTFS reference defines it. A row naming
+  a station applies to all of its stops; rows with route or trip IDs apply only
+  to those routes and trips; when several rows apply to a change, the most
+  specific one wins (both trips, then a trip and a route, one trip, both
+  routes, one route, stops only; between equally specific rows, one naming the
+  stops beats one naming their stations). A `transfer_type = 3` row forbids
+  the change, also across a walk. A `transfer_type = 2` row requires its
+  `min_transfer_time` between alighting and boarding, also across a walk,
+  and never less than `min_transfer_s.same_station` for a change at one
+  station. The verifier checks exactly this. The planner applies minimum times
+  conservatively per station (the largest one in a station raises its change
+  time; one between two stations lengthens their walk link), so its routes
+  meet whichever row applies, and it refuses to plan when a row forbids a
+  transfer inside the network, because it cannot yet tell stops apart within
+  a station.
 - **Time window:** the first and last target visits must lie inside
-  `[earliest_start, latest_end]` of the plan date's service day. Trips from the
-  previous and next service days are included where they fall in the window.
+  `[earliest_start, latest_end]` of the plan date's service day. Trips of every
+  service day that reaches into the window are included, shifted by the exact
+  offset between service days in the feed's time zone.
+- **Data the planner leaves out:** trips whose times go backwards along their
+  stop sequence, and trips with more than 65,537 stops, are left out and
+  counted in the build report, so the planner and the verifier never disagree
+  about when a trip calls where.
 
 ## Total time
 

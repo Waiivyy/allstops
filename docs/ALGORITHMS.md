@@ -55,20 +55,41 @@ not a visit.
 targets), the scan stops as soon as a connection departs after the best visit
 found among them, since no later connection can improve it.
 
+**Connections at the same instant.** Real timetables round to whole minutes,
+so many hops take no time and several connections share one departure time
+(the MVV feed has 72,732 bus hops of zero seconds). Connections are sorted by
+departure, then arrival, trip and position, so a trip's own hops are scanned
+in order. A change between two trips, or a walk, always takes at least one
+second (the rules reject shorter minimums), so nothing that becomes possible
+after an arrival can depart at that same instant, and the scan never misses
+such a transfer. With zero-second changes this would not hold, which is why
+the rules forbid them.
+
+**Walk pruning.** A walk from a later alighting at a station reaches every
+destination no earlier than a walk from an earlier one, so walks start from a
+station only after its earliest alighting so far. This keeps every label and
+cut a one-to-all scan of the MVV network from 6.99 ms to 1.78 ms on average.
+
 **Correctness check.** `allstops-core/src/oracle.rs` computes the same visit
 labels with a different method: Dijkstra over explicit states (ready at a
 station, just alighted, at the origin, aboard a hop). A property test compares
 the two on random networks with transfer times, walks, pickup and drop-off
-restrictions, non-visiting connector trips and all three origin kinds; 10,000
-random networks agree. Deliberately breaking the change time or the pickup
-check makes the test fail.
+restrictions, non-visiting connector trips, zero-second hops and all three
+origin kinds. The default test run checks 512 networks; a long run with
+`ALLSTOPS_PROPTEST_CASES=100000` also agrees on every one. Deliberately breaking
+the change time or the pickup check makes the test fail. RAPTOR (Delling,
+Pajor, Werneck, 2012) is implemented as a second, independent check of the
+board labels.
 
 ## The first route: nearest unvisited target
 
-`plan::greedy` starts at a station and time, runs a scan with early
-termination towards all unvisited targets, takes the journey to whichever can
-be visited first, and repeats from where that journey ends, staying aboard the
-train when that is faster. Consecutive rides on the same trip are merged into
+`plan::greedy` starts at a station and time. Its first step visits that
+station (a run from a station starts there), and every later step runs a scan
+with early termination towards all unvisited targets, takes the journey to
+whichever can be visited first, and repeats from where that journey ends,
+staying aboard the train when that is faster. If the last target is reached
+aboard a train that does not let passengers off there, the last ride goes on
+to the next stop that does; the total time does not change. Consecutive rides on the same trip are merged into
 one leg. The visited set is recomputed from the legs after every step, never
 taken from search bookkeeping. The CLI runs the greedy from every target
 station at 12 start times ten minutes apart, in parallel, and keeps the
@@ -118,10 +139,13 @@ lowers them. For node penalties `pi`, the minimum 1-tree under costs
 subgradient steps on `pi` raise it. Every iterate is a valid bound and the best
 is kept. Path costs are whole seconds, so the bound is rounded up.
 
-**Checks.** On thousands of random synthetic instances small enough for an
-exhaustive search (`oracle::optimum`, Dijkstra over states and visited sets),
-both bounds are always at most the true optimum, and the greedy is never
-better than it. Every reported result checks `bound <= found route` and fails
+**Checks.** On random synthetic instances small enough for an exhaustive
+search (`oracle::optimum`, Dijkstra over states and visited sets), both bounds
+are always at most the true optimum, and the greedy is never better than it:
+400 instances by default and 5,000 in a long run (`ALLSTOPS_SYNTH_CASES`),
+each also with zero-second hops. During review, the exhaustive optimum was
+cross-checked against a separate brute force that enumerates rides, with the
+same answer on about 42,000 feasible networks. Every reported result checks `bound <= found route` and fails
 loudly otherwise.
 
 **Why the bounds are still loose.** On the Munich U-Bahn the profile bound is

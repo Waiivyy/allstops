@@ -172,4 +172,10 @@ prerequisite for Stage 4.
 - MVV: CC BY 4.0 (see `docs/DATA.md`). Packs built from it are adapted
   material and may be redistributed with attribution and a note that they
   were changed.
-- Dependencies are permissively licensed (MIT, Apache-2.0, Unlicense, BSD).
+- Dependencies are permissively licensed. In the `allstops` binary's
+  dependency tree (`cargo tree -e normal`) most crates are MIT or
+  Apache-2.0; the exceptions are ISC, BSD-3-Clause and Apache-2.0 AND ISC
+  (`ring`) in the HTTPS stack that `fetch` uses, Zlib (`zlib-rs`,
+  decompression), Unicode-3.0 together with MIT or Apache-2.0
+  (`unicode-ident`), and CDLA-Permissive-2.0 for the bundled CA root
+  certificates (`webpki-roots`).

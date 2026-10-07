@@ -5,9 +5,10 @@ Licensed under the MIT licence or the Apache License 2.0, at your option.
 Timetable data
 --------------
 
-This project does not include timetable data in the repository. Generated
-network packs and every exported result carry the attribution of the feed they
-were built from. Feeds are listed in data/feeds.toml.
+This project does not include timetable data in the repository. Every
+itinerary and every command output that shows feed data carries the
+attribution of the feed it came from; network packs (planned) will carry it
+too. Feeds are listed in data/feeds.toml.
 
 Munich (feed id "mvv")
   Münchner Verkehrs- und Tarifverbund GmbH (MVV)
