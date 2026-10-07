@@ -12,10 +12,6 @@ use serde_json::{Value, json};
 const DEFAULT_TRANSFERS: &str =
     "from_stop_id,to_stop_id,transfer_type,min_transfer_time\nC1,C2,3,\n";
 
-fn feed() -> Feed {
-    feed_with_transfers(DEFAULT_TRANSFERS)
-}
-
 fn feed_with_transfers(transfers: &str) -> Feed {
     Feed::from_zip_bytes(
         &minimal_with(&[
@@ -281,7 +277,7 @@ fn change_at_charlie() -> Value {
 
 #[test]
 fn station_level_rows_apply_to_child_stops() {
-    let none = format!("{T_HEADER}");
+    let none = T_HEADER.to_string();
     assert_eq!(check_with(&change_at_charlie(), &none), Vec::<&str>::new());
     let forbid = format!("{T_HEADER}C,C,,,,,3,\n");
     assert_eq!(
