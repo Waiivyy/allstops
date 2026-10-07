@@ -117,18 +117,18 @@ choose a date inside its range.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[GTFS zip] --> B[Load with input limits]
     B --> C[Cluster stops into stations]
     C --> D[Select target stations]
     D --> E[Build the network for the plan date]
     E --> F[Search: Connection Scan and greedy]
+    E --> K[Lower bounds]
     F --> G[Itinerary JSON]
     G --> H{Independent verifier}
     H -- passes --> I[Route, lower bound and gap]
-    H -- rejects --> J[Error: nothing is shown]
-    E --> K[Lower bounds]
     K --> I
+    H -- rejects --> J[Error: nothing is shown]
 ```
 
 1. **Stations.** GTFS stops are clustered into the stations a passenger would
