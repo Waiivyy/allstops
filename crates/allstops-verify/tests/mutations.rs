@@ -9,7 +9,14 @@ use allstops_gtfs::{Feed, Limits};
 use allstops_verify::{Context, parse, verify};
 use serde_json::{Value, json};
 
+const DEFAULT_TRANSFERS: &str =
+    "from_stop_id,to_stop_id,transfer_type,min_transfer_time\nC1,C2,3,\n";
+
 fn feed() -> Feed {
+    feed_with_transfers(DEFAULT_TRANSFERS)
+}
+
+fn feed_with_transfers(transfers: &str) -> Feed {
     Feed::from_zip_bytes(
         &minimal_with(&[
             (
@@ -38,10 +45,7 @@ fn feed() -> Feed {
                  T7,08:10:30,08:10:30,C1,1,0,1\nT7,08:16:00,08:16:00,D1,2,1,0\n\
                  T8,08:30:00,08:30:00,D1,1,1,0\nT8,08:35:00,08:35:00,E1,2,1,0\n",
             ),
-            (
-                "transfers.txt",
-                "from_stop_id,to_stop_id,transfer_type,min_transfer_time\nC1,C2,3,\n",
-            ),
+            ("transfers.txt", transfers),
         ]),
         &Limits::default(),
     )
@@ -89,7 +93,11 @@ fn valid() -> Value {
 }
 
 fn check(doc: &Value) -> Vec<&'static str> {
-    let feed = feed();
+    check_with(doc, DEFAULT_TRANSFERS)
+}
+
+fn check_with(doc: &Value, transfers: &str) -> Vec<&'static str> {
+    let feed = feed_with_transfers(transfers);
     let cal = ServiceCalendar::new(&feed);
     let c = cluster(&feed, &ClusterConfig::default());
     let sel = Selection {
@@ -254,4 +262,92 @@ fn verifier_does_not_use_the_solver_crate() {
         !manifest.contains("network"),
         "allstops-verify must not enable the solver-facing network feature of allstops-gtfs"
     );
+}
+
+// ---- transfers.txt semantics (GTFS reference, transfers.txt) ------------
+
+const T_HEADER: &str = "from_stop_id,to_stop_id,from_route_id,to_route_id,from_trip_id,to_trip_id,transfer_type,min_transfer_time\n";
+
+/// T1 to C1 at 08:10, then T5 from C2 at 08:20 (a 10-minute change).
+fn change_at_charlie() -> Value {
+    let mut d = valid();
+    d["legs"] = json!([
+        ride("T1", "A1", "08:00:00", "C1", "08:10:00", &["A", "B", "C"]),
+        ride("T5", "C2", "08:20:00", "D1", "08:25:00", &["C", "D"]),
+        ride("T6", "D1", "08:30:00", "E1", "08:35:00", &["D", "E"]),
+    ]);
+    d
+}
+
+#[test]
+fn station_level_rows_apply_to_child_stops() {
+    let none = format!("{T_HEADER}");
+    assert_eq!(check_with(&change_at_charlie(), &none), Vec::<&str>::new());
+    let forbid = format!("{T_HEADER}C,C,,,,,3,\n");
+    assert_eq!(
+        check_with(&change_at_charlie(), &forbid),
+        vec!["FORBIDDEN_TRANSFER"]
+    );
+    let slow = format!("{T_HEADER}C,C,,,,,2,1200\n");
+    assert_eq!(
+        check_with(&change_at_charlie(), &slow),
+        vec!["TRANSFER_TOO_SHORT"]
+    );
+    let ok = format!("{T_HEADER}C,C,,,,,2,600\n");
+    assert_eq!(check_with(&change_at_charlie(), &ok), Vec::<&str>::new());
+}
+
+#[test]
+fn trip_and_route_rows_apply_only_to_their_trips() {
+    // Forbids only T7 to T5; the itinerary changes from T1 to T5.
+    let other_trip = format!("{T_HEADER}C1,C2,,,T7,T5,3,\n");
+    assert_eq!(
+        check_with(&change_at_charlie(), &other_trip),
+        Vec::<&str>::new()
+    );
+    let this_trip = format!("{T_HEADER}C1,C2,,,T1,T5,3,\n");
+    assert_eq!(
+        check_with(&change_at_charlie(), &this_trip),
+        vec!["FORBIDDEN_TRANSFER"]
+    );
+    let other_route = format!("{T_HEADER}C1,C2,U2,,,,3,\n");
+    assert_eq!(
+        check_with(&change_at_charlie(), &other_route),
+        Vec::<&str>::new()
+    );
+    let this_route = format!("{T_HEADER}C1,C2,U1,U1,,,3,\n");
+    assert_eq!(
+        check_with(&change_at_charlie(), &this_route),
+        vec!["FORBIDDEN_TRANSFER"]
+    );
+}
+
+#[test]
+fn the_most_specific_row_wins() {
+    // A station-wide ban, overridden for this pair of trips by a 5-minute
+    // minimum: the change is allowed.
+    let rows = format!("{T_HEADER}C,C,,,,,3,\nC1,C2,,,T1,T5,2,300\n");
+    assert_eq!(check_with(&change_at_charlie(), &rows), Vec::<&str>::new());
+    // The reverse: a station-wide minimum, and a ban for exactly these trips.
+    let rows = format!("{T_HEADER}C,C,,,,,2,60\nC1,C2,,,T1,T5,3,\n");
+    assert_eq!(
+        check_with(&change_at_charlie(), &rows),
+        vec!["FORBIDDEN_TRANSFER"]
+    );
+    // Two rows on the same stops: the one naming the trips wins, whatever
+    // the file order.
+    let rows = format!("{T_HEADER}C1,C2,,,T1,T5,2,60\nC1,C2,,,,,2,900\n");
+    assert_eq!(check_with(&change_at_charlie(), &rows), Vec::<&str>::new());
+}
+
+#[test]
+fn minimum_times_apply_across_a_walk() {
+    // valid(): T1 alights at C1 at 08:10, walks to D, boards T6 at D1 at
+    // 08:30, 20 minutes after alighting.
+    let short = format!("{T_HEADER}C1,D1,,,,,2,1500\n");
+    assert_eq!(check_with(&valid(), &short), vec!["TRANSFER_TOO_SHORT"]);
+    let enough = format!("{T_HEADER}C1,D1,,,,,2,1200\n");
+    assert_eq!(check_with(&valid(), &enough), Vec::<&str>::new());
+    let banned = format!("{T_HEADER}C,D,,,,,3,\n");
+    assert_eq!(check_with(&valid(), &banned), vec!["FORBIDDEN_TRANSFER"]);
 }

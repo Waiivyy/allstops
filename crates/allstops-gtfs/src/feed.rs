@@ -153,9 +153,18 @@ pub struct Frequency {
 }
 
 #[derive(Debug, Clone)]
+/// A transfers.txt row. A stop may name a station (`location_type = 1`), in
+/// which case the rule applies to all of its child stops. Route and trip
+/// fields narrow the rule; see the specificity ranking in the GTFS reference.
 pub struct Transfer {
-    pub from_stop: StopIdx,
-    pub to_stop: StopIdx,
+    pub from_stop: Option<StopIdx>,
+    pub to_stop: Option<StopIdx>,
+    pub from_route: Option<RouteIdx>,
+    pub to_route: Option<RouteIdx>,
+    pub from_trip: Option<TripIdx>,
+    pub to_trip: Option<TripIdx>,
+    /// 0 recommended, 1 timed, 2 minimum time, 3 not possible, 4 in-seat
+    /// allowed, 5 in-seat not allowed.
     pub transfer_type: u8,
     pub min_transfer_time: Option<i32>,
 }
@@ -173,7 +182,9 @@ pub struct LoadWarnings {
     pub stops_unknown_parent: u64,
     pub calendar_dates_bad_exception: u64,
     pub frequencies_unknown_trip: u64,
-    pub transfers_unknown_stop: u64,
+    /// transfers.txt rows skipped: unknown stop, route or trip, an unknown
+    /// transfer_type, or type 2 without a minimum time.
+    pub transfers_skipped: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -778,27 +789,64 @@ fn load_frequencies(t: &mut Table, feed: &mut Feed) -> Result<()> {
 fn load_transfers(t: &mut Table, feed: &mut Feed) -> Result<()> {
     let from = t.column("from_stop_id");
     let to = t.column("to_stop_id");
+    let from_route = t.column("from_route_id");
+    let to_route = t.column("to_route_id");
+    let from_trip = t.column("from_trip_id");
+    let to_trip = t.column("to_trip_id");
     let ty = t.require("transfer_type")?;
     let min = t.column("min_transfer_time");
     while t.next_row()? {
-        let (f, to_s) = (t.get(from)?, t.get(to)?);
-        let (Some(&fi), Some(&ti)) = (feed.stop_index.get(f), feed.stop_index.get(to_s)) else {
-            // Trip-to-trip and route-to-route transfers without stops are
-            // not used yet.
-            feed.warnings.transfers_unknown_stop += 1;
+        // An empty field means "not set"; a set field must resolve.
+        fn lookup<T: Copy>(
+            map: &HashMap<String, T>,
+            v: &str,
+        ) -> std::result::Result<Option<T>, ()> {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                map.get(v).copied().map(Some).ok_or(())
+            }
+        }
+        let refs = (
+            lookup(&feed.stop_index, t.get(from)?),
+            lookup(&feed.stop_index, t.get(to)?),
+            lookup(&feed.route_index, t.get(from_route)?),
+            lookup(&feed.route_index, t.get(to_route)?),
+            lookup(&feed.trip_index, t.get(from_trip)?),
+            lookup(&feed.trip_index, t.get(to_trip)?),
+        );
+        let (Ok(from_stop), Ok(to_stop), Ok(fr), Ok(tr), Ok(ft), Ok(tt)) = refs else {
+            feed.warnings.transfers_skipped += 1;
             continue;
         };
-        let transfer_type = match t.get(Some(ty))? {
+        let transfer_type: u8 = match t.get(Some(ty))? {
             "" => 0,
-            s => s.parse().map_err(|_| t.error("bad transfer_type"))?,
+            s => match s.parse() {
+                Ok(v) if v <= 5 => v,
+                _ => {
+                    feed.warnings.transfers_skipped += 1;
+                    continue;
+                }
+            },
         };
         let min_transfer_time = match t.get(min)? {
             "" => None,
-            s => Some(s.parse().map_err(|_| t.error("bad min_transfer_time"))?),
+            s => match s.parse::<i32>() {
+                Ok(v) if v >= 0 => Some(v),
+                _ => return Err(t.error(format!("bad min_transfer_time {s:?}"))),
+            },
         };
+        if transfer_type == 2 && min_transfer_time.is_none() {
+            feed.warnings.transfers_skipped += 1;
+            continue;
+        }
         feed.transfers.push(Transfer {
-            from_stop: fi,
-            to_stop: ti,
+            from_stop,
+            to_stop,
+            from_route: fr,
+            to_route: tr,
+            from_trip: ft,
+            to_trip: tt,
             transfer_type,
             min_transfer_time,
         });

@@ -8,7 +8,7 @@
 //! Every problem is reported as a [`Violation`] with a stable code and, where
 //! it belongs to one leg, that leg's index.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
 use allstops_gtfs::calendar::{ServiceCalendar, service_day_origin};
@@ -164,11 +164,109 @@ fn clock(s: &str) -> Option<i64> {
 struct Place {
     station: String,
     time: i64,
-    /// Stop and trip of the last ride, if the previous leg was a ride.
-    alight: Option<(u32, String)>,
-    /// Stop of the last alighting, kept across a walk.
-    last_alight_stop: Option<u32>,
+    /// Stop, trip key (`trip@date`) and trip of the last ride, if the
+    /// previous movement was a ride.
+    alight: Option<(u32, String, u32)>,
+    /// The last alighting (stop, trip, time), kept across a walk.
+    last_alight: Option<(u32, u32, i64)>,
     after_walk: bool,
+}
+
+/// What transfers.txt says about one change between two trips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferRule {
+    /// No row applies, or the most specific one sets no constraint.
+    Default,
+    /// `transfer_type = 2`: at least this many seconds.
+    AtLeast(i64),
+    /// `transfer_type = 3`: not possible.
+    Forbidden,
+}
+
+/// transfers.txt rows indexed by their (from, to) stop or station.
+struct Transfers<'f> {
+    feed: &'f Feed,
+    by_pair: HashMap<(u32, u32), Vec<&'f allstops_gtfs::feed::Transfer>>,
+}
+
+impl<'f> Transfers<'f> {
+    fn new(feed: &'f Feed) -> Self {
+        let mut by_pair: HashMap<(u32, u32), Vec<&allstops_gtfs::feed::Transfer>> = HashMap::new();
+        for t in &feed.transfers {
+            // Rows without stops only describe in-seat transfers (types 4
+            // and 5), which never apply to a change between two rides.
+            if let (Some(f), Some(to)) = (t.from_stop, t.to_stop) {
+                by_pair.entry((f, to)).or_default().push(t);
+            }
+        }
+        Transfers { feed, by_pair }
+    }
+
+    /// The rule for changing from `from_trip` at `from_stop` to `to_trip` at
+    /// `to_stop`. Rows may name the stop or its parent station. Among the
+    /// rows that apply, the most specific wins, ranked as in the GTFS
+    /// reference: both trips; a trip and a route; one trip; both routes;
+    /// one route; stops only. A trip ID outranks a route ID on the same
+    /// side. Between equally specific rows, one naming the stops themselves
+    /// beats one naming their stations.
+    fn rule(&self, from_stop: u32, from_trip: u32, to_stop: u32, to_trip: u32) -> TransferRule {
+        let feed = self.feed;
+        let candidates = |s: u32| {
+            let mut v = vec![(s, true)];
+            if let Some(p) = feed.stops[s as usize].parent {
+                v.push((p, false));
+            }
+            v
+        };
+        let from_route = feed.trips[from_trip as usize].route;
+        let to_route = feed.trips[to_trip as usize].route;
+        let mut best: Option<((u8, u8), &allstops_gtfs::feed::Transfer)> = None;
+        for (fs, f_exact) in candidates(from_stop) {
+            for (ts, t_exact) in candidates(to_stop) {
+                for row in self.by_pair.get(&(fs, ts)).into_iter().flatten() {
+                    let side = |trip: Option<u32>,
+                                route: Option<u32>,
+                                actual_trip: u32,
+                                actual_route: u32| {
+                        match (trip, route) {
+                            (Some(t), _) if t != actual_trip => None,
+                            (Some(_), _) => Some(2u8),
+                            (None, Some(r)) if r != actual_route => None,
+                            (None, Some(_)) => Some(1),
+                            (None, None) => Some(0),
+                        }
+                    };
+                    let (Some(a), Some(b)) = (
+                        side(row.from_trip, row.from_route, from_trip, from_route),
+                        side(row.to_trip, row.to_route, to_trip, to_route),
+                    ) else {
+                        continue;
+                    };
+                    // Ranks 1 (most specific) to 6, as in the reference.
+                    let rank = match (a.max(b), a.min(b)) {
+                        (2, 2) => 1,
+                        (2, 1) => 2,
+                        (2, 0) => 3,
+                        (1, 1) => 4,
+                        (1, 0) => 5,
+                        _ => 6,
+                    };
+                    let exactness = 2 - (f_exact as u8 + t_exact as u8);
+                    let key = (rank, exactness);
+                    if best.is_none_or(|(k, _)| key < k) {
+                        best = Some((key, row));
+                    }
+                }
+            }
+        }
+        match best {
+            Some((_, row)) if row.transfer_type == 3 => TransferRule::Forbidden,
+            Some((_, row)) if row.transfer_type == 2 => {
+                TransferRule::AtLeast(i64::from(row.min_transfer_time.unwrap_or(0)))
+            }
+            _ => TransferRule::Default,
+        }
+    }
 }
 
 pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
@@ -254,18 +352,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
         let s = ctx.clustering.station_of_stop[stop as usize];
         ctx.clustering.stations[s as usize].id.clone()
     };
-    let forbidden: BTreeSet<(u32, u32)> = feed
-        .transfers
-        .iter()
-        .filter(|t| t.transfer_type == 3)
-        .map(|t| (t.from_stop, t.to_stop))
-        .collect();
-    let min_transfer: HashMap<(u32, u32), i64> = feed
-        .transfers
-        .iter()
-        .filter(|t| t.transfer_type == 2)
-        .filter_map(|t| Some(((t.from_stop, t.to_stop), i64::from(t.min_transfer_time?))))
-        .collect();
+    let transfers = Transfers::new(feed);
 
     // First visit time of each station, absolute.
     let mut visited: HashMap<String, i64> = HashMap::new();
@@ -411,34 +498,40 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                             "ride departs before the previous leg ends".into(),
                         );
                     }
-                    if let Some((prev_stop, prev_trip)) = &p.alight {
-                        let continuing = *prev_trip == format!("{trip_id}@{service_date}");
-                        let need = if continuing {
-                            0
+                    let continuing = p
+                        .alight
+                        .as_ref()
+                        .is_some_and(|(_, key, _)| *key == format!("{trip_id}@{service_date}"));
+                    if let Some((prev_stop, prev_trip, alighted)) = p.last_alight
+                        && !continuing
+                    {
+                        let rule = transfers.rule(prev_stop, prev_trip, rows[bi].stop, ti);
+                        if rule == TransferRule::Forbidden {
+                            push(
+                                "FORBIDDEN_TRANSFER",
+                                li_,
+                                "transfers.txt forbids this change".into(),
+                            );
+                        }
+                        // Directly after a ride the runner's own change time
+                        // applies too; after a walk the walk already took
+                        // its own time.
+                        let own = if p.alight.is_some() {
+                            r.min_transfer_s.same_station
                         } else {
-                            ctx_min(
-                                &min_transfer,
-                                *prev_stop,
-                                rows[bi].stop,
-                                r.min_transfer_s.same_station,
-                            )
+                            0
                         };
-                        if start < p.time + need {
+                        let need = match rule {
+                            TransferRule::AtLeast(m) => m.max(own),
+                            _ => own,
+                        };
+                        if start < alighted + need {
                             push(
                                 "TRANSFER_TOO_SHORT",
                                 li_,
-                                format!("{}s to change, {need}s needed", start - p.time),
+                                format!("{}s to change, {need}s needed", start - alighted),
                             );
                         }
-                    }
-                    if let Some(prev_stop) = p.last_alight_stop
-                        && forbidden.contains(&(prev_stop, rows[bi].stop))
-                    {
-                        push(
-                            "FORBIDDEN_TRANSFER",
-                            li_,
-                            "transfers.txt forbids this change".into(),
-                        );
                     }
                 }
 
@@ -475,8 +568,8 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                 place = Some(Place {
                     station: station_id_of_stop(rows[ai].stop),
                     time: end,
-                    alight: Some((rows[ai].stop, format!("{trip_id}@{service_date}"))),
-                    last_alight_stop: Some(rows[ai].stop),
+                    alight: Some((rows[ai].stop, format!("{trip_id}@{service_date}"), ti)),
+                    last_alight: Some((rows[ai].stop, ti, end)),
                     after_walk: false,
                 });
             }
@@ -533,7 +626,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                         );
                     }
                 }
-                let last_alight_stop = place.as_ref().and_then(|p| p.last_alight_stop);
+                let last_alight = place.as_ref().and_then(|p| p.last_alight);
                 let (sa, sb) = (&ctx.clustering.stations[a], &ctx.clustering.stations[b]);
                 let d = distance_m(sa.lat, sa.lon, sb.lat, sb.lon);
                 if d > r.max_walk_m + 0.5 {
@@ -557,7 +650,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                     station: to_station.clone(),
                     time: e,
                     alight: None,
-                    last_alight_stop,
+                    last_alight,
                     after_walk: true,
                 });
             }
@@ -665,14 +758,6 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
         None
     };
     finish(v, duration, visited.len())
-}
-
-fn ctx_min(min_transfer: &HashMap<(u32, u32), i64>, from: u32, to: u32, default: i64) -> i64 {
-    min_transfer
-        .get(&(from, to))
-        .copied()
-        .unwrap_or(default)
-        .max(default)
 }
 
 fn finish(violations: Vec<Violation>, duration_s: Option<i64>, stations_visited: usize) -> Report {

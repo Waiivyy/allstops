@@ -162,7 +162,7 @@ fn print_human(p: &Profile) {
         ("stops unknown parent", l.stops_unknown_parent),
         ("calendar_dates bad type", l.calendar_dates_bad_exception),
         ("frequencies unknown trip", l.frequencies_unknown_trip),
-        ("transfers unknown stop", l.transfers_unknown_stop),
+        ("transfers rows skipped", l.transfers_skipped),
     ];
     for (label, n) in rows {
         let v = n.to_string();

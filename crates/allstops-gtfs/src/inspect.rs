@@ -90,7 +90,7 @@ pub struct LoadWarningsView {
     pub stops_unknown_parent: u64,
     pub calendar_dates_bad_exception: u64,
     pub frequencies_unknown_trip: u64,
-    pub transfers_unknown_stop: u64,
+    pub transfers_skipped: u64,
 }
 
 impl From<&LoadWarnings> for LoadWarningsView {
@@ -106,7 +106,7 @@ impl From<&LoadWarnings> for LoadWarningsView {
             stops_unknown_parent: w.stops_unknown_parent,
             calendar_dates_bad_exception: w.calendar_dates_bad_exception,
             frequencies_unknown_trip: w.frequencies_unknown_trip,
-            transfers_unknown_stop: w.transfers_unknown_stop,
+            transfers_skipped: w.transfers_skipped,
         }
     }
 }
