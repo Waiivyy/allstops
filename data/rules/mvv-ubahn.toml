@@ -11,7 +11,7 @@ allow_walking = true
 walking_speed_kmh = 4.5
 walk_detour_factor = 1.3
 max_walk_m = 1200
-connector_modes = ["tram", "bus"]
+connector_modes = ["tram", "bus", "rail"]
 min_transfer_s = { same_station = 60, walk_link = 120 }
 tight_transfer_s = 120
 count_pass_through = false
