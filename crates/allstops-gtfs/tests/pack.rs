@@ -313,3 +313,92 @@ fn packs_respect_the_size_limit() {
     };
     assert!(pack::read(&bytes, &limits).is_err());
 }
+
+// ---- crafted packs ----------------------------------------------------------
+
+/// Split a pack into its header section and inflated body.
+fn sections(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    use std::io::Read;
+    let at = pack::MAGIC.len() + 4;
+    let hlen = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let header = bytes[at + 4..at + 4 + hlen].to_vec();
+    let b = at + 4 + hlen;
+    let blen = u64::from_le_bytes(bytes[b..b + 8].try_into().unwrap()) as usize;
+    let mut body = Vec::new();
+    flate2::read::DeflateDecoder::new(&bytes[b + 8..b + 8 + blen])
+        .read_to_end(&mut body)
+        .unwrap();
+    (header, body)
+}
+
+/// Reassemble a pack with a valid checksum around any body, as a crafted
+/// file would be.
+fn assemble(header: &[u8], body: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    use std::io::Write;
+    let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(1));
+    z.write_all(body).unwrap();
+    let body = z.finish().unwrap();
+    let mut out = pack::MAGIC.to_vec();
+    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    out.extend_from_slice(header);
+    out.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    out.extend_from_slice(&body);
+    let sum = sha2::Sha256::digest(&out);
+    out.extend_from_slice(&sum);
+    out
+}
+
+/// Read a pack and plan on it; errors are fine, panics are not.
+fn use_pack(bytes: &[u8]) {
+    let Ok(p) = pack::read(bytes, &Limits::default()) else {
+        return;
+    };
+    let rules = Rules {
+        date: "2026-11-12".into(),
+        connector_modes: vec!["tram".into()],
+        ..Rules::default()
+    };
+    let types: Vec<_> = p.visit_types.iter().map(|&t| t..=t).collect();
+    let _ = build_network(
+        &p.feed,
+        &ServiceCalendar::new(&p.feed),
+        &p.clustering,
+        &p.targets,
+        &types,
+        &rules,
+        &p.walks,
+    );
+}
+
+#[test]
+fn a_pack_reassembled_unchanged_reads_back() {
+    let (header, body) = sections(&build());
+    assert!(pack::read(&assemble(&header, &body), &Limits::default()).is_ok());
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: std::env::var("ALLSTOPS_FUZZ_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    #[test]
+    fn crafted_pack_bodies_never_panic(
+        edits in proptest::collection::vec((0.0f64..1.0, proptest::prelude::any::<u8>()), 1..8),
+        cut in proptest::option::of(0.0f64..1.0),
+    ) {
+        let (header, mut body) = sections(&build());
+        for (at, v) in &edits {
+            let i = ((*at * body.len() as f64) as usize).min(body.len() - 1);
+            body[i] = *v;
+        }
+        if let Some(c) = cut {
+            body.truncate((c * body.len() as f64) as usize);
+        }
+        let bytes = assemble(&header, &body);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| use_pack(&bytes)));
+        proptest::prop_assert!(r.is_ok(), "panic after {edits:?}, cut {cut:?}");
+    }
+}
