@@ -39,6 +39,7 @@ use crate::error::{Error, LimitKind, Result};
 use crate::feed::{Feed, StopTime};
 use crate::limits::Limits;
 use crate::table::Table;
+use crate::time::MAX_SERVICE_SECONDS;
 use crate::walks::WalkOverrides;
 
 /// First bytes of every pack.
@@ -46,7 +47,7 @@ pub const MAGIC: &[u8] = b"ALLSTOPSPACK";
 
 /// Format of packs this build writes and reads. Any change to the layout or
 /// to the header or body types needs a new version.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// What a pack was built from. Read without decoding the rest.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -104,12 +105,21 @@ struct Body {
     walks: WalkOverrides,
     /// The subset, without its stop times.
     feed: Feed,
-    patterns: Vec<Vec<PatternCall>>,
-    /// (arrival, departure) of each call, minus the trip's first departure.
-    timings: Vec<Vec<(i32, i32)>>,
+    /// Stop patterns, one after the other; pattern `i` ends at
+    /// `pattern_ends[i]`. Flat, so an empty pattern costs no allocation.
+    pattern_calls: Vec<PatternCall>,
+    pattern_ends: Vec<u32>,
+    /// Timing patterns: (arrival, departure) of each call minus the trip's
+    /// first departure, laid out like the stop patterns.
+    timing_calls: Vec<(i32, i32)>,
+    timing_ends: Vec<u32>,
     /// One per trip of `feed`.
     trip_calls: Vec<TripCalls>,
 }
+
+/// Times a decoded pack may hold: what the loader can produce, from
+/// frequency runs shifted a full week back to times shifted a week on.
+const TIMES: std::ops::RangeInclusive<i32> = -MAX_SERVICE_SECONDS..=2 * MAX_SERVICE_SECONDS;
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct PatternCall {
@@ -266,7 +276,7 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
     let gtfs = subset_zip(src.zip, limits, &routes, &stops)?;
     let subset = Feed::from_zip_bytes(&gtfs, limits)?;
     let clustering = clustering_from(&subset, &stations)?;
-    let (patterns, timings, trip_calls) = encode_stop_times(&subset)?;
+    let tables = encode_stop_times(&subset)?;
     let mut header = src.header.clone();
     header.counts = PackCounts {
         stations: clustering.stations.len(),
@@ -275,8 +285,8 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
         routes: subset.routes.len(),
         trips: subset.trips.len(),
         stop_times: subset.stop_times.len(),
-        stop_patterns: patterns.len(),
-        timing_patterns: timings.len(),
+        stop_patterns: tables.pattern_ends.len(),
+        timing_patterns: tables.timing_ends.len(),
         body_bytes: 0,
     };
     let body = Body {
@@ -285,9 +295,11 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
         visit_types: src.visit_types.to_vec(),
         walks,
         feed: subset,
-        patterns,
-        timings,
-        trip_calls,
+        pattern_calls: tables.pattern_calls,
+        pattern_ends: tables.pattern_ends,
+        timing_calls: tables.timing_calls,
+        timing_ends: tables.timing_ends,
+        trip_calls: tables.trip_calls,
     };
     let raw = encode(&body)?;
     header.counts.body_bytes = raw.len();
@@ -328,16 +340,21 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-type StopTimeTables = (Vec<Vec<PatternCall>>, Vec<Vec<(i32, i32)>>, Vec<TripCalls>);
+#[derive(Default)]
+struct StopTimeTables {
+    pattern_calls: Vec<PatternCall>,
+    pattern_ends: Vec<u32>,
+    timing_calls: Vec<(i32, i32)>,
+    timing_ends: Vec<u32>,
+    trip_calls: Vec<TripCalls>,
+}
 
 /// Split stop times into deduplicated stop and timing patterns. Fails if
 /// the stop times are not laid out trip after trip, which decoding assumes.
 fn encode_stop_times(feed: &Feed) -> Result<StopTimeTables> {
-    let mut patterns: Vec<Vec<PatternCall>> = Vec::new();
+    let mut out = StopTimeTables::default();
     let mut pattern_ids: HashMap<Vec<PatternCall>, u32> = HashMap::new();
-    let mut timings: Vec<Vec<(i32, i32)>> = Vec::new();
     let mut timing_ids: HashMap<Vec<(i32, i32)>, u32> = HashMap::new();
-    let mut trip_calls = Vec::with_capacity(feed.trips.len());
     let mut next = 0u32;
     for (ti, trip) in feed.trips.iter().enumerate() {
         let r = &trip.stop_times;
@@ -364,14 +381,16 @@ fn encode_stop_times(feed: &Feed) -> Result<StopTimeTables> {
             .map(|s| (s.arrival - base, s.departure - base))
             .collect();
         let p = *pattern_ids.entry(pattern).or_insert_with_key(|k| {
-            patterns.push(k.clone());
-            patterns.len() as u32 - 1
+            out.pattern_calls.extend_from_slice(k);
+            out.pattern_ends.push(out.pattern_calls.len() as u32);
+            out.pattern_ends.len() as u32 - 1
         });
         let t = *timing_ids.entry(timing).or_insert_with_key(|k| {
-            timings.push(k.clone());
-            timings.len() as u32 - 1
+            out.timing_calls.extend_from_slice(k);
+            out.timing_ends.push(out.timing_calls.len() as u32);
+            out.timing_ends.len() as u32 - 1
         });
-        trip_calls.push(TripCalls {
+        out.trip_calls.push(TripCalls {
             pattern: p,
             timing: t,
             base,
@@ -382,22 +401,62 @@ fn encode_stop_times(feed: &Feed) -> Result<StopTimeTables> {
             "internal error: some stop times belong to no trip",
         ));
     }
-    Ok((patterns, timings, trip_calls))
+    Ok(out)
 }
 
-/// Rebuild the stop times from the patterns and check every index in the
-/// feed, so a crafted pack cannot make later code index out of bounds.
-fn decode_feed(body: &mut Body) -> Result<()> {
+/// The spans of flat patterns given their end offsets, which must rise to
+/// exactly `len`.
+fn spans(ends: &[u32], len: usize) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut out = Vec::with_capacity(ends.len());
+    let mut start = 0usize;
+    for &e in ends {
+        let e = e as usize;
+        if e < start || e > len {
+            return None;
+        }
+        out.push(start..e);
+        start = e;
+    }
+    (start == len).then_some(out)
+}
+
+/// Rebuild the stop times from the patterns and check every index and time
+/// in the feed, so a crafted pack cannot make later code index out of
+/// bounds, overflow, or rebuild more stop times than a zip may hold.
+fn decode_feed(body: &mut Body, limits: &Limits) -> Result<()> {
     let bad = |m: String| pack_error(format!("the pack's timetable is inconsistent: {m}"));
     let feed = &mut body.feed;
     if body.trip_calls.len() != feed.trips.len() {
         return Err(bad("trip count".into()));
     }
-    let mut stop_times: Vec<StopTime> = Vec::new();
+    let (Some(pspans), Some(tspans)) = (
+        spans(&body.pattern_ends, body.pattern_calls.len()),
+        spans(&body.timing_ends, body.timing_calls.len()),
+    ) else {
+        return Err(bad("pattern offsets".into()));
+    };
+    let mut total = 0u64;
+    for tc in &body.trip_calls {
+        let Some(p) = pspans.get(tc.pattern as usize) else {
+            return Err(bad("a trip names a missing pattern".into()));
+        };
+        total += p.len() as u64;
+    }
+    if total > limits.max_rows_per_file {
+        return Err(Error::Limit(LimitKind::RowCount {
+            file: "stop times in the pack".into(),
+            limit: limits.max_rows_per_file,
+        }));
+    }
+    let mut stop_times: Vec<StopTime> = Vec::with_capacity(total as usize);
     for (ti, (trip, tc)) in feed.trips.iter().zip(&body.trip_calls).enumerate() {
         let (Some(p), Some(t)) = (
-            body.patterns.get(tc.pattern as usize),
-            body.timings.get(tc.timing as usize),
+            pspans
+                .get(tc.pattern as usize)
+                .map(|r| &body.pattern_calls[r.clone()]),
+            tspans
+                .get(tc.timing as usize)
+                .map(|r| &body.timing_calls[r.clone()]),
         ) else {
             return Err(bad(format!("trip {:?} names a missing pattern", trip.id)));
         };
@@ -416,6 +475,9 @@ fn decode_feed(body: &mut Body) -> Result<()> {
             else {
                 return Err(bad(format!("times of trip {:?}", trip.id)));
             };
+            if !TIMES.contains(&arrival) || !TIMES.contains(&departure) {
+                return Err(bad(format!("times of trip {:?}", trip.id)));
+            }
             stop_times.push(StopTime {
                 trip: ti as u32,
                 stop: c.stop,
@@ -450,7 +512,20 @@ fn decode_feed(body: &mut Body) -> Result<()> {
             .calendar_dates
             .iter()
             .all(|c| (c.service as usize) < services)
-        && feed.frequencies.iter().all(|f| (f.trip as usize) < trips)
+        && feed.frequencies.iter().all(|f| {
+            (f.trip as usize) < trips
+                && TIMES.contains(&f.start)
+                && TIMES.contains(&f.end)
+                && f.headway > 0
+        })
+        && feed
+            .trips
+            .iter()
+            .all(|t| t.template.is_none_or(|x| (x as usize) < trips))
+        && feed.transfers.iter().all(|t| {
+            t.min_transfer_time
+                .is_none_or(|m| (0..=MAX_SERVICE_SECONDS).contains(&m))
+        })
         && feed.transfers.iter().all(|t| {
             within(t.from_stop, stops)
                 && within(t.to_stop, stops)
@@ -565,17 +640,18 @@ pub fn read(bytes: &[u8], limits: &Limits) -> Result<Pack> {
     }
     let mut raw = Vec::new();
     flate2::read::DeflateDecoder::new(packed)
-        .take(limits.max_uncompressed_bytes.saturating_add(1))
+        .take(limits.max_pack_body_bytes.saturating_add(1))
         .read_to_end(&mut raw)
         .map_err(|e| pack_error(format!("the pack's body is unreadable: {e}")))?;
-    if raw.len() as u64 > limits.max_uncompressed_bytes {
+    if raw.len() as u64 > limits.max_pack_body_bytes {
         return Err(Error::Limit(LimitKind::UncompressedSize {
-            limit: limits.max_uncompressed_bytes,
+            limit: limits.max_pack_body_bytes,
         }));
     }
+    let raw_len = raw.len();
     let mut body: Body = decode(&raw, "body")?;
     drop(raw);
-    decode_feed(&mut body)?;
+    decode_feed(&mut body, limits)?;
     let feed = body.feed;
     let clustering = clustering_from(&feed, &body.stations)?;
     if let Some(&t) = body
@@ -586,6 +662,20 @@ pub fn read(bytes: &[u8], limits: &Limits) -> Result<Pack> {
         return Err(pack_error(format!(
             "the pack names target {t}, which is not a station"
         )));
+    }
+    let counts = PackCounts {
+        stations: clustering.stations.len(),
+        targets: body.targets.len(),
+        stops: feed.stops.len(),
+        routes: feed.routes.len(),
+        trips: feed.trips.len(),
+        stop_times: feed.stop_times.len(),
+        stop_patterns: body.pattern_ends.len(),
+        timing_patterns: body.timing_ends.len(),
+        body_bytes: raw_len,
+    };
+    if counts != header.counts {
+        return Err(pack_error("the pack's header does not match its contents"));
     }
     Ok(Pack {
         header,
@@ -789,4 +879,140 @@ fn filter_table(
         .into_inner()
         .map_err(|e| pack_error(format!("writing {file}: {e}")))?;
     Ok((bytes, kept_trips, kept_services))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::{ClusterConfig, cluster};
+    use crate::feed::Trip;
+    use crate::fixture::minimal_with;
+
+    /// A pack of the minimal fixture, split into its header and decoded body.
+    fn sample() -> (PackHeader, Body) {
+        let zip = minimal_with(&[]);
+        let feed = Feed::from_zip_bytes(&zip, &Limits::default()).unwrap();
+        let c = cluster(&feed, &ClusterConfig::default());
+        let targets: Vec<u32> = ["S1a", "S2a"]
+            .iter()
+            .map(|s| c.station_of_stop[feed.stop_index[*s] as usize])
+            .collect();
+        let bytes = build(
+            &PackSource {
+                zip: &zip,
+                feed: &feed,
+                clustering: &c,
+                targets: &targets,
+                visit_types: &[1],
+                connector_types: &[],
+                walks: &WalkOverrides::default(),
+                header: PackHeader::default(),
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+        let mut cur = open(&bytes).unwrap();
+        let header: PackHeader = decode(cur.section(4).unwrap(), "header").unwrap();
+        let mut raw = Vec::new();
+        flate2::read::DeflateDecoder::new(cur.section(8).unwrap())
+            .read_to_end(&mut raw)
+            .unwrap();
+        (header, decode(&raw, "body").unwrap())
+    }
+
+    /// A pack with a valid checksum around any header and body.
+    fn craft(header: &PackHeader, body: &Body) -> Vec<u8> {
+        let header = encode(header).unwrap();
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(1));
+        z.write_all(&encode(body).unwrap()).unwrap();
+        let packed = z.finish().unwrap();
+        let mut out = MAGIC.to_vec();
+        out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&(packed.len() as u64).to_le_bytes());
+        out.extend_from_slice(&packed);
+        let sum = Sha256::digest(&out);
+        out.extend_from_slice(&sum);
+        out
+    }
+
+    fn err(header: &PackHeader, body: &Body, limits: &Limits) -> String {
+        read(&craft(header, body), limits).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn the_sample_reads_back() {
+        let (h, b) = sample();
+        assert!(read(&craft(&h, &b), &Limits::default()).is_ok());
+    }
+
+    #[test]
+    fn many_trips_sharing_a_long_pattern_hit_the_row_limit() {
+        // 5,000 trips on one 5,000-call pattern would rebuild 25 million stop
+        // times from a few kilobytes.
+        let (h, mut b) = sample();
+        let call = b.pattern_calls[0].clone();
+        b.pattern_calls = vec![call; 5_000];
+        b.pattern_ends = vec![5_000];
+        b.timing_calls = vec![(0, 0); 5_000];
+        b.timing_ends = vec![5_000];
+        let trip = b.feed.trips[0].clone();
+        b.feed.trips = (0..5_000)
+            .map(|i| Trip {
+                id: format!("T{i}"),
+                ..trip.clone()
+            })
+            .collect();
+        b.trip_calls = (0..5_000)
+            .map(|_| TripCalls {
+                pattern: 0,
+                timing: 0,
+                base: 0,
+            })
+            .collect();
+        let limits = Limits {
+            max_rows_per_file: 1_000_000,
+            ..Limits::default()
+        };
+        let e = err(&h, &b, &limits);
+        assert!(e.contains("stop times in the pack"), "{e}");
+    }
+
+    #[test]
+    fn times_beyond_what_the_loader_produces_are_refused() {
+        let (h, mut b) = sample();
+        b.trip_calls[0].base = i32::MAX - 10;
+        let e = err(&h, &b, &Limits::default());
+        assert!(e.contains("times of trip"), "{e}");
+    }
+
+    #[test]
+    fn pattern_offsets_must_add_up() {
+        let (h, mut b) = sample();
+        b.pattern_ends[0] += 1;
+        let e = err(&h, &b, &Limits::default());
+        assert!(e.contains("pattern offsets"), "{e}");
+    }
+
+    #[test]
+    fn the_header_counts_must_match_the_contents() {
+        let (mut h, b) = sample();
+        h.counts.stop_times += 1;
+        let e = err(&h, &b, &Limits::default());
+        assert!(e.contains("header does not match"), "{e}");
+    }
+
+    #[test]
+    fn an_oversized_body_is_refused() {
+        let (h, b) = sample();
+        let limits = Limits {
+            max_pack_body_bytes: 10,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            read(&craft(&h, &b), &limits),
+            Err(Error::Limit(LimitKind::UncompressedSize { .. }))
+        ));
+    }
 }

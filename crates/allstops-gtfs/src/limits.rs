@@ -18,6 +18,9 @@ pub struct Limits {
     pub max_rows_per_file: u64,
     /// Bytes in any single physical line.
     pub max_line_bytes: usize,
+    /// Bytes of a network pack's body after decompression (the Munich
+    /// pack's is about 15 MB).
+    pub max_pack_body_bytes: u64,
 }
 
 impl Default for Limits {
@@ -30,6 +33,7 @@ impl Default for Limits {
             max_entries: 64,
             max_rows_per_file: 40_000_000,
             max_line_bytes: 64 << 10,
+            max_pack_body_bytes: 256 << 20,
         }
     }
 }
