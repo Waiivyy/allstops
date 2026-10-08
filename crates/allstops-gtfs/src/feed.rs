@@ -100,6 +100,10 @@ pub struct Trip {
     /// A trip with frequencies.txt rows. Its stop times are only the travel
     /// time pattern for its expanded runs; the template itself never runs.
     pub frequency_template: bool,
+    /// For a run expanded from frequencies.txt, the template trip it was
+    /// expanded from. transfers.txt rows that name the template's trip_id
+    /// apply to its runs.
+    pub template: Option<TripIdx>,
 }
 
 /// pickup_type / drop_off_type: 0 regular, 1 none, 2 phone agency,
@@ -544,6 +548,7 @@ fn load_trips(
             stop_times: 0..0,
             frequency: None,
             frequency_template: false,
+            template: None,
         });
     }
     Ok(())
@@ -879,6 +884,7 @@ fn expand_frequencies(feed: &mut Feed, max_rows: u64) -> Result<()> {
                 run.id = format!("{}@{}", run.id, crate::time::format_time(start));
                 run.frequency = Some(f.exact_times);
                 run.frequency_template = false;
+                run.template = Some(trip);
                 run.stop_times = from..feed.stop_times.len() as u32;
                 if feed.trip_index.insert(run.id.clone(), new_trip).is_some() {
                     return Err(file_err(format!(

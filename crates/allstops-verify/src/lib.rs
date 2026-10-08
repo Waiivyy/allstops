@@ -227,9 +227,14 @@ impl<'f> Transfers<'f> {
     /// reference: both trips; a trip and a route; one trip; both routes;
     /// one route; stops only. A trip ID outranks a route ID on the same
     /// side. Between equally specific rows, one naming the stops themselves
-    /// beats one naming their stations.
+    /// beats one naming their stations. A run expanded from frequencies.txt
+    /// matches rows that name its template trip.
     fn rule(&self, from_stop: u32, from_trip: u32, to_stop: u32, to_trip: u32) -> TransferRule {
         let feed = self.feed;
+        let (from_trip, to_trip) = (
+            feed.trips[from_trip as usize].template.unwrap_or(from_trip),
+            feed.trips[to_trip as usize].template.unwrap_or(to_trip),
+        );
         let candidates = |s: u32| {
             let mut v = vec![(s, true)];
             if let Some(p) = feed.stops[s as usize].parent {

@@ -53,10 +53,13 @@ fn schedule_based_rows_expand_to_exact_departures() {
     assert_eq!(r[0].1, t("05:59:00"));
     assert_eq!(r[0].3, t("06:05:00"));
     assert_eq!(r[0].0, "T1@06:00:00");
-    // Every expanded run is schedule-based.
+    // Every expanded run is schedule-based and knows its template.
+    let template = feed.trip_index["T1"];
+    assert_eq!(feed.trips[template as usize].template, None);
     for (i, tr) in feed.trips.iter().enumerate() {
         if !tr.frequency_template {
             assert_eq!(tr.frequency, Some(true), "trip {i}");
+            assert_eq!(tr.template, Some(template), "trip {i}");
         }
     }
 }

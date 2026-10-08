@@ -46,7 +46,7 @@ pub const MAGIC: &[u8] = b"ALLSTOPSPACK";
 
 /// Format of packs this build writes and reads. Any change to the layout or
 /// to the header or body types needs a new version.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// What a pack was built from. Read without decoding the rest.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
