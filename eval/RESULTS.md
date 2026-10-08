@@ -5,10 +5,10 @@ Written by `cargo xtask bench`; rerun the command to refresh this file. Per-inst
 | Run | |
 |---|---|
 | Command | `cargo xtask bench` |
-| Date (UTC) | 2026-10-07 |
-| Commit | `402d8db748e3 with uncommitted changes` |
+| Date (UTC) | 2026-10-08 |
+| Commit | `90737c7a7a8e` |
 | Machine | Apple M5, 10 cores; every run single-threaded, release build |
-| Load average (1 min) at start / end | 5.57 / 4.95 |
+| Load average (1 min) at start / end | 6.52 / 5.19 |
 | Greedy starts | every target station at 12 start times, 10 min apart from earliest_start |
 
 ## Caveats
@@ -37,9 +37,9 @@ Plan date 2026-11-12 (a Thursday), default rules. Tiny: 3 to 7 target stations, 
 | gap greedy to optimum, mean / max | 8.9% / 77.3% | n/a |
 | lower bound <= optimum (asserted) | 200 / 200 (100.0%) | n/a |
 | gap greedy to lower bound, mean / max | 27.8% / 153.8% | 37.3% / 82.4% |
-| time to first verified route, ms, median / max | 0.02 / 0.59 | 0.07 / 0.10 |
-| time to best route, ms, median / max | 0.08 / 0.35 | 2.16 / 4.40 |
-| brute-force optimum, ms, median / max | 13.0 / 1497 | n/a |
+| time to first verified route, ms, median / max | 0.02 / 0.34 | 0.07 / 0.12 |
+| time to best route, ms, median / max | 0.08 / 0.36 | 2.20 / 4.41 |
+| brute-force optimum, ms, median / max | 12.7 / 1475 | n/a |
 | transfers per route, mean | 0.83 | 5.36 |
 | tight transfers (slack under 120 s), total | 92 | 122 |
 | smallest transfer slack, s | 0 | 0 |
@@ -47,10 +47,10 @@ Plan date 2026-11-12 (a Thursday), default rules. Tiny: 3 to 7 target stations, 
 
 ## Real networks
 
-- Munich U-Bahn: feed sha256 `13e9b6db7681c3849f57bc8afb97c3182b9994dbb512dd6d242af0fe6961b21c`, feed version 20261005, parsed in 563 ms; rules `data/rules/mvv-ubahn.toml`.
+- Munich U-Bahn: feed sha256 `13e9b6db7681c3849f57bc8afb97c3182b9994dbb512dd6d242af0fe6961b21c`, feed version 20261005, parsed in 574 ms; rules `data/rules/mvv-ubahn.toml`.
 
 | network | date | targets | connections | greedy runs with a route | best route | lower bound | gap | transfers | tight | min slack s | walk m | verified | build ms | solve ms | first route ms | best route ms | bounds ms |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Munich U-Bahn | 2026-11-09 | 96 | 778244 | 1152 / 1152 | 4:26:40 | 2:46:30 | 60.2% | 14 | 9 | 0 | 142 | yes | 84.7 | 1617 | 3.57 | 1619 | 10463 |
-| Munich U-Bahn | 2026-11-12 | 96 | 778688 | 1152 / 1152 | 4:29:10 | 2:46:30 | 61.7% | 17 | 10 | 0 | 190 | yes | 84.9 | 1623 | 3.27 | 1625 | 10463 |
-| Munich U-Bahn | 2026-11-14 | 96 | 542282 | 1152 / 1152 | 4:45:50 | 2:44:45 | 73.5% | 15 | 8 | 0 | 296 | yes | 64.5 | 1177 | 3.15 | 1179 | 6820 |
+| Munich U-Bahn | 2026-11-09 | 96 | 791196 | 1152 / 1152 | 4:26:40 | 2:46:30 | 60.2% | 14 | 9 | 0 | 142 | yes | 94.6 | 1931 | 3.47 | 1933 | 11787 |
+| Munich U-Bahn | 2026-11-12 | 96 | 791649 | 1152 / 1152 | 4:29:10 | 2:46:30 | 61.7% | 17 | 10 | 0 | 190 | yes | 93.5 | 1692 | 3.35 | 1696 | 11163 |
+| Munich U-Bahn | 2026-11-14 | 96 | 553746 | 1152 / 1152 | 4:45:50 | 2:44:45 | 73.5% | 15 | 8 | 0 | 296 | yes | 89.4 | 1311 | 3.06 | 1313 | 7198 |

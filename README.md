@@ -10,10 +10,11 @@ Berlin, New York and many other networks. Every route is replayed against the
 raw timetable by an independent verifier before it is shown, and every result
 comes with a lower bound, a time that no route under the same rules can beat.
 
-> **Status: early development. Stage 0 of 6 (feasibility) is complete.** The
-> command-line tool can fetch and profile a feed, build stations, plan a first
-> route, verify it and bound it. Route optimisation, exports, the browser
-> planner and the live run mode are on the [roadmap](#roadmap).
+> **Status: early development. Stage 1 of 6 (data layer) is complete.** The
+> command-line tool can fetch and profile a feed, build stations with manual
+> corrections, write a compact network pack, plan a first route, verify it and
+> bound it. Route optimisation, exports, the browser planner and the live run
+> mode are on the [roadmap](#roadmap).
 
 ## Highlights
 
@@ -31,7 +32,12 @@ comes with a lower bound, a time that no route under the same rules can beat.
   reported as an error with the file and line. Fuzz-style tests push mutated
   feeds through the whole data pipeline to check that nothing crashes.
 - **Reproducible.** Feeds are pinned by SHA-256, rules are saved with every
-  result, and ties are broken deterministically.
+  result, ties are broken deterministically, and network packs build to the
+  same bytes every time.
+- **Compact packs.** `allstops pack` stores what plans for one network need in
+  a versioned, checksummed file: 3.1 MB for Munich with every tram, bus and
+  rail connector trip (the feed is 17.9 MB), loading in about 60 ms instead of
+  about 640 ms.
 - **Private.** No accounts, no telemetry. The CLI only goes online when you run
   `fetch`.
 
@@ -42,7 +48,7 @@ interchanges twice; see [docs/RULES.md](docs/RULES.md#the-munich-station-count-9
 
 ```console
 $ allstops solve data/cache/mvv.gtfs.zip --rules data/rules/mvv-ubahn.toml --date 2026-11-12 --out route.json
-feed loaded in 592 ms; network for 2026-11-12 built in 90 ms: 42258 trips, 778688 connections, 8987 stations, 88842 walk links, 96 targets
+feed loaded in 647 ms; network for 2026-11-12 built in 81 ms: 43424 trips, 791649 connections, 9192 stations, 89210 walk links, 96 targets
 wrote route.json
 Greedy route, 2026-11-12
   total time       4:29:10
@@ -61,9 +67,9 @@ Greedy route, 2026-11-12
     tight: 20 s spare at Mangfallplatz
     tight: 40 s spare at Dietlindenstraße
   lower bound      2:46:30 (gap 61.7%)
-    static         2:18:25 (108 ms)
-    profile        2:46:30 (10219 ms)
-  greedy runs      1152 (1152 covered every target) in 312 ms
+    static         2:16:25 (110 ms)
+    profile        2:46:30 (10688 ms)
+  greedy runs      1152 (1152 covered every target) in 330 ms
   verified against the raw timetable
 Times are service-day clock times (may exceed 24:00).
 Timetable data: Münchner Verkehrs- und Tarifverbund GmbH (MVV), CC BY 4.0, retrieved 2026-10-06, feed version 20261005
@@ -108,6 +114,15 @@ Then fetch the Munich feed, plan a route and check it independently:
 ./target/release/allstops verify data/cache/mvv.gtfs.zip route.json --rules data/rules/mvv-ubahn.toml
 ```
 
+To plan several times, pack the network once and plan from the pack. It holds
+every date of the feed and the rules it was built with; `--date` and `--rules`
+still apply:
+
+```bash
+./target/release/allstops pack data/cache/mvv.gtfs.zip --rules data/rules/mvv-ubahn.toml
+./target/release/allstops solve data/cache/mvv-ubahn.pack --date 2026-11-12 --out route.json
+```
+
 The plan date must lie inside the feed's validity range, which `inspect`
 prints. MVV replaces its feed every few weeks. When the published file no
 longer matches the pinned hash, `fetch` stops and shows the old and new
@@ -119,9 +134,11 @@ choose a date inside its range.
 ```mermaid
 flowchart TD
     A[GTFS zip] --> B[Load with input limits]
-    B --> C[Cluster stops into stations]
+    B --> C[Cluster stops into stations, apply overrides]
     C --> D[Select target stations]
     D --> E[Build the network for the plan date]
+    D -.-> P[(Network pack)]
+    P -.-> E
     E --> F[Search: Connection Scan and greedy]
     E --> K[Lower bounds]
     F --> G[Itinerary JSON]
@@ -133,11 +150,15 @@ flowchart TD
 
 1. **Stations.** GTFS stops are clustered into the stations a passenger would
    name, using `parent_station`, German DHID station IDs, and names within a
-   distance. Every count and visit works on stations.
+   distance; an overrides file can merge, split or rename stations. Every
+   count and visit works on stations.
 2. **Network.** Trips of every service day that reaches into the time window
    are placed on one time line, with exact offsets across daylight-saving
-   changes. Walk links join nearby stations under the walking rules, and
-   `transfers.txt` minimums lengthen changes and walks where they apply.
+   changes. Walk links join nearby stations under the walking rules (or take
+   measured times from a walks file), and `transfers.txt` minimums lengthen
+   changes and walks where they apply. A network pack stores the part of the
+   feed that the selection and its connector modes can use, so networks for
+   any date are built without reading the zip again.
 3. **Search.** A [Connection Scan](https://arxiv.org/abs/1703.05997) engine
    finds the earliest time each station can be visited, aboard a train that
    stops there or by boarding one. A greedy heuristic repeatedly travels to the
@@ -169,7 +190,7 @@ Measured with `cargo xtask bench` (Apple M5, 10 cores; single-threaded release b
 
 These are first routes from the greedy heuristic, and the bound is still loose: it relaxes the order in which stations are visited and lets each pair of consecutive stations use its best-aligned connection of the day (see [docs/ALGORITHMS.md](docs/ALGORITHMS.md#lower-bounds)). Route optimisation and stronger bounds are Stage 3.
 
-**Planned versus achieved.** The Guinness World Records time for visiting all Munich U-Bahn stations is 4 h 19 min 21 s, achieved by Lorenz Wünsch and Till Rasche on 21 April 2022 from Garching-Forschungszentrum to Messestadt Ost. The times above are plans on the November 2026 timetable under the default rules: scheduled times without delays, walking and never running, a 60-second minimum change, and trams, buses and the S-Bahn as connectors. A plan is not a record, and the two numbers are not directly comparable.
+**Planned versus achieved.** The Guinness World Records time for visiting all Munich U-Bahn stations is 4 h 19 min 21 s, achieved by Lorenz Wünsch and Till Rasche on 21 April 2022 from Garching-Forschungszentrum to Messestadt Ost. The times above are plans on the November 2026 timetable under the default rules: scheduled times without delays, walking and never running, a 60-second minimum change, and trams, buses, the S-Bahn and regional trains as connectors. A plan is not a record, and the two numbers are not directly comparable.
 
 ### Synthetic networks
 
@@ -189,10 +210,11 @@ Full tables, timings and caveats: [eval/RESULTS.md](eval/RESULTS.md).
 | Command | What it does |
 |---|---|
 | `allstops fetch <id>` | Download a registered feed over HTTPS and check its pinned SHA-256 |
-| `allstops inspect <zip>` | Feed profile: validity, structure, warnings, date coverage |
-| `allstops stations <zip>` | Cluster stops into stations; list a selection's targets |
-| `allstops solve <zip> --rules <toml>` | Plan a route, verify it, report the lower bound and gap |
-| `allstops verify <zip> <itinerary.json> --rules <toml>` | Check any itinerary against the raw feed and the given rules |
+| `allstops inspect <zip-or-pack>` | Feed profile (validity, structure, warnings, date coverage), or a pack's header |
+| `allstops stations <zip>` | Cluster stops into stations, apply overrides, list a selection's targets |
+| `allstops pack <zip> --rules <toml>` | Write a network pack and report its size, build time and load time |
+| `allstops solve <zip-or-pack> --rules <toml>` | Plan a route, verify it, report the lower bound and gap (`--rules` is optional with a pack) |
+| `allstops verify <zip-or-pack> <itinerary.json> --rules <toml>` | Check any itinerary against the timetable and the given rules |
 
 Every command accepts `--json` for machine-readable output. Exit codes: `0`
 success; `1` no feasible route, or an itinerary rejected by the verifier; `2`
@@ -206,14 +228,17 @@ The defaults for Munich (`data/rules/mvv-ubahn.toml`):
 - A station counts as visited when a U-Bahn train you are on stops there, or
   when you board one there. You do not need to get off. Passing through without
   a scheduled stop does not count, and neither does walking past.
-- Trams and buses may be used to move between stations but never count as
-  visits. (In the MVV feed the S-Bahn is coded as tram, so it is allowed too.)
+- Trams, buses, the S-Bahn and regional trains may be used to move between
+  stations but never count as visits.
 - Walks of up to 1,200 m straight-line distance, at an assumed 4.5 km/h with a
   detour factor of 1.3 and at least 2 minutes each; never two walks in a row.
 - At least 60 seconds to change trains at a station. Changes with less than
   2 minutes to spare beyond that are flagged as tight.
 - `transfers.txt` is honoured as the GTFS reference defines it: minimum times
   are kept, forbidden transfers are never used.
+- Per network, an overrides file can correct the station list and a walks file
+  can replace estimated walk times with measured ones or forbid a walk
+  ([docs/RULES.md](docs/RULES.md#override-files)). Munich uses neither.
 - Time runs from the first visit to the last, between 04:30 and 26:00 of the
   plan date's service day.
 
@@ -225,7 +250,7 @@ them with the published Guinness World Records guidelines.
 
 ```bash
 cargo test                                   # unit, property and mutation tests
-cargo test -p allstops-gtfs -- --ignored     # snapshot test against the pinned MVV feed
+cargo test --release -p allstops-gtfs -- --ignored   # Munich station snapshot and pack determinism
 cargo xtask bench                            # synthetic and real networks, writes eval/RESULTS.md
 ```
 
@@ -240,25 +265,31 @@ cargo xtask bench                            # synthetic and real networks, writ
   station, overlapping legs) is rejected with the expected code.
 - **Bounds** are asserted to be at most the exact optimum, found by exhaustive
   search, on every small synthetic network in the benchmark.
+- **Packs** build to identical bytes twice, a pack of another format version
+  is refused with a clear message, and a network built from a pack is
+  byte-identical to one built from the feed, on test feeds and on Munich.
+  Packs with crafted bodies and valid checksums end in an error, never a
+  crash.
 - **Untrusted input** tests cover truncated archives, zip bombs, archives with
   too many entries, oversized lines, invalid UTF-8, missing columns, malformed
-  times, skipped calendar dates and mutated feeds (run in debug builds, so
-  integer overflows would also fail).
+  times, skipped calendar dates, mutated feeds and crafted packs (run in debug
+  builds, so integer overflows would also fail).
 
 Also available: `cargo xtask routing` (Connection Scan against RAPTOR),
-`cargo xtask parse` (GTFS loaders), `cargo xtask pack` (serialisation formats)
+`cargo xtask parse` (GTFS loaders), `cargo xtask pack` (serialisation formats
+compared in Stage 0)
 and `cargo xtask bound-tuning`.
 
 ## Project layout
 
 | Path | Contents |
 |---|---|
-| `crates/allstops-gtfs` | Feed loading with limits, calendars, station clustering, selection, network building |
+| `crates/allstops-gtfs` | Feed loading with limits, calendars, station clustering and overrides, selection, walks, network building, packs |
 | `crates/allstops-core` | Network model, Connection Scan, profile scans, plans, lower bounds, itinerary schema, rules |
 | `crates/allstops-verify` | The independent verifier |
 | `crates/allstops-cli` | The `allstops` command-line tool |
 | `xtask` | Benchmarks, synthetic network generator, experiments |
-| `data` | Feed registry, rules and selections (no timetable data) |
+| `data` | Feed registry, rules, selections and overrides (no timetable data) |
 | `docs` | Rules, data notes, algorithms, design decisions |
 | `eval` | Benchmark specification and latest results |
 
@@ -267,7 +298,7 @@ and `cargo xtask bound-tuning`.
 | Stage | Scope | Status |
 |---|---|---|
 | 0 | Data profiling, feasibility spike, benchmark harness, design, review | done |
-| 1 | Data layer: overrides, footpaths with measured walks, deterministic network packs | planned |
+| 1 | Data layer: overrides, footpaths with measured walks, deterministic network packs | done |
 | 2 | Routing and verifier: profile queries, larger property suites against a time-expanded oracle | planned |
 | 3 | Solver: corridor decomposition, stronger bounds, local search, robustness, replanning, exports | planned |
 | 4 | Web planner: the engine in WebAssembly, map replay, prebuilt packs | planned |
@@ -276,8 +307,9 @@ and `cargo xtask bound-tuning`.
 
 ## FAQ
 
-**Is this the optimal route?** Not yet. Stage 0 plans with a greedy heuristic,
-and the reported gap to the lower bound is large. A route is only called
+**Is this the optimal route?** Not yet. The planner still uses a greedy
+heuristic (search comes in Stage 3), and the reported gap to the lower bound
+is large. A route is only called
 optimal when its gap is zero.
 
 **Why was my real run slower than the plan?** The plan assumes every train runs
