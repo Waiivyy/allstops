@@ -125,18 +125,17 @@ ticketing files. The size saving comes from the encoding, not the filtering:
 
 | | |
 |---|---|
-| Pack | 3,143,506 bytes, 17.6% of the 17,880,036-byte zip |
-| Body before compression | 15,020,610 bytes |
+| Pack | 3,171,750 bytes, 17.7% of the 17,880,036-byte zip |
+| Body before compression | 15,173,536 bytes |
 | Stop patterns / timing patterns | 9,317 / 10,397 for 115,225 trips |
-| Build | about 2.25 s (3 runs) |
-| Load | median 58 ms over 6 runs, against median 637 ms for the zip |
-| Network for one date | about 60 ms on top (2026-11-14, 553,746 connections) |
-| Determinism | two builds give the same SHA-256 (`e7b164e7…0de50f3b` for allstops 0.0.1) |
+| Build | about 2.1 s (3 runs) |
+| Load | median 51.5 ms over 6 runs, against median 556 ms for the zip |
+| Network for one date | 56 to 59 ms on top (2026-11-14, 553,746 connections) |
+| Determinism | two builds give the same SHA-256 (`cc286b15…f76364e3` for allstops 0.0.1, pack format 3), also when run from another directory |
 
-Measured on an Apple M5 while the machine was busy (load average 15 to 18),
-so absolute times are rough. A solve from the pack and one from the zip give
-byte-identical itinerary JSON for 2026-11-12, and each itinerary verifies
-against the other source.
+Measured on an Apple M5 at a load average of about 5. A solve from the pack
+and one from the zip gave byte-identical itinerary JSON for 2026-11-12, and
+each itinerary verifies against the other source.
 
 ### Shapes
 

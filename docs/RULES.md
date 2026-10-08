@@ -99,7 +99,8 @@ to = "de:09162:1"
 forbid = true
 ```
 
-Each entry sets exactly one of `seconds` (1 to 86,400) or `forbid`. A measured
+Each entry sets exactly one of `seconds` (1 to 86,400) or `forbid`, and
+names stations of the feed (any other ID is an error). A measured
 time is still raised to `min_transfer_s.walk_link`, and to a longer
 `transfers.txt` minimum where one applies. An override never creates a walk:
 it applies only to a link within `max_walk_m`, and `allstops solve` reports

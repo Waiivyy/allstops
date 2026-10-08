@@ -35,9 +35,9 @@ comes with a lower bound, a time that no route under the same rules can beat.
   result, ties are broken deterministically, and network packs build to the
   same bytes every time.
 - **Compact packs.** `allstops pack` stores what plans for one network need in
-  a versioned, checksummed file: 3.1 MB for Munich with every tram, bus and
-  rail connector trip (the feed is 17.9 MB), loading in about 60 ms instead of
-  about 640 ms.
+  a versioned, checksummed file: 3.2 MB for Munich with every tram, bus and
+  rail connector trip (the feed is 17.9 MB), loading in about 50 ms instead of
+  about 560 ms.
 - **Private.** No accounts, no telemetry. The CLI only goes online when you run
   `fetch`.
 

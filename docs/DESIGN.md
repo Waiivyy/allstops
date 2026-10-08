@@ -149,13 +149,16 @@ that builds it from a zip.
 
 How it is built (`allstops-gtfs/src/pack.rs`):
 
-1. Keep the routes of the target and connector route types, their trips,
-   stop times, frequencies and services, every stop of every station a kept
-   trip calls at (and of their parents' stations), and the transfers between
-   kept stops, routes and trips. Rows are copied from the GTFS files field for
-   field into a subset, and the normal loader reads the subset, so time
-   interpolation, frequency expansion and every check apply exactly as for a
-   zip.
+1. Keep the routes of the target and connector route types with their
+   trips, stop times and frequencies, every stop of every station a kept
+   trip calls at (and of their parents' stations), the transfers between
+   kept stops, routes and trips, every service calendar (so the accepted plan
+   dates are the feed's) and every walks entry. Rows are copied from the GTFS
+   files field for field into a subset, and the normal loader reads the
+   subset, so time interpolation, frequency expansion and every check apply
+   exactly as for a zip. Transfer rows that name a route or trip outside the
+   pack can match no change in the network, and the network builder skips
+   them for a zip as well.
 2. Store the loaded tables with postcard. Stop times, nearly all of the data,
    are split into deduplicated stop patterns (stops, sequence numbers, pickup
    and drop-off types) and timing patterns (times relative to the trip's first
@@ -165,26 +168,36 @@ How it is built (`allstops-gtfs/src/pack.rs`):
    to finish unless it gives exactly the loaded subset.
 
 Reading checks the magic bytes, the format version (a pack of any other
-version is refused with a message to rebuild it), the checksum, the size
-limits, and every index in the decoded tables, so a crafted pack ends in an
-error, never a panic. The same input gives the same bytes: fixed file order,
+version is refused with a message to rebuild it), the checksum, the size of
+the file and of the inflated body (256 MiB by default), the number of stop
+times the patterns expand to (the same row limit a zip gets, checked before
+anything is allocated), every index and time in the decoded tables, and that
+the header's counts match the contents. A crafted pack ends in an error,
+never a panic, and costs at most a small multiple of the body limit in
+memory, comparable to what the row limits allow a zip. The same input gives the same bytes: fixed file order,
 no timestamps, first-seen pattern order and a fixed compression level.
 
 The hashes in the header are SHA-256 of the canonical JSON (fields in
 declaration order) of the parsed selection, rules, station overrides and
 walks; an override hash is absent when its file is absent or empty. `solve`
 and `verify` accept rules with a pack only when these match and the rules
-name no connector mode the pack lacks.
+name no connector mode whose route types the pack lacks. Without `--rules`,
+`verify` checks the itinerary's own rules against the pack the same way.
+The feed's identity and attribution come from the `data/feeds.toml` found
+from the feed file's location, so a pack does not depend on the directory
+it is built from.
 
-Measured on Munich (details in `docs/DATA.md`): 3,143,506 bytes, 17.6% of
-the zip, loading in a median of 58 ms against 637 ms for the zip. Two
-alternatives were measured and rejected:
+Measured on Munich (details in `docs/DATA.md`): 3,171,750 bytes, 17.7% of
+the zip, loading in a median of 51.5 ms against 556 ms for the zip. Two
+alternatives were measured and rejected: the first row is the Stage 0
+measurement above, under the rules of that time; the second was measured on
+an earlier build of this stage, at a load average of 15 to 18.
 
 | Pack content | Bytes | Load |
 |---|---|---|
 | The network for one date (Stage 0 table above, postcard plus deflate) | 13,600,424 | 15.7 to 16.1 ms to decode (inflating not measured), but one pack per date and per rules |
 | The subset as a GTFS zip (CSV rows, deflate level 6) | 18,045,310 | 533 ms, about the same as the full zip |
-| The subset as loaded tables with stop and timing patterns (chosen) | 3,143,506 | 58 ms |
+| The subset as loaded tables with stop and timing patterns (chosen) | 3,171,750 | 51.5 ms |
 
 The pack lives in `allstops-gtfs`, not in `allstops-core` as first sketched,
 because what it stores is feed tables and stations, which are that crate's
