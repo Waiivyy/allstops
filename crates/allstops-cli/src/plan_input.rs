@@ -206,6 +206,7 @@ pub fn basis_from_zip(
     let feed = Feed::from_zip_bytes(bytes, &Limits::default())?;
     let load_ms = t0.elapsed().as_secs_f64() * 1e3;
     let clustering = stations(&feed, overrides)?;
+    walks.check_stations(&clustering)?;
     let targets = select(&feed, &clustering, selection)?;
     Ok(Basis {
         visit_types: visit_types(&feed, selection)?,

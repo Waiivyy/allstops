@@ -282,6 +282,7 @@ fn run_instance(src: &Source, files: &RuleFiles, with_optimum: bool, row: &mut R
     let (selection, rules) = (&files.selection, &files.rules);
     let t = Instant::now();
     let clustering = crate::real::stations(&src.feed, &files.stations)?;
+    files.walks.check_stations(&clustering)?;
     let targets = select(&src.feed, &clustering, selection)?;
     let cal = ServiceCalendar::new(&src.feed);
     let (net, report) = build_network(

@@ -110,6 +110,7 @@ pub fn load(zip: &Path, rules_path: &Path, date: Option<&str>) -> Result<Real> {
     }
     let t1 = Instant::now();
     let clustering = stations(&feed, &station_overrides)?;
+    walks.check_stations(&clustering)?;
     let targets = select(&feed, &clustering, &selection)?;
     let cal = ServiceCalendar::new(&feed);
     let (network, report) = build_network(

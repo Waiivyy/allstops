@@ -86,20 +86,12 @@ pub fn build_network(
         file: "rules".into(),
         message: m,
     };
+    // Entries naming stations outside the network count as unused; callers
+    // check the stations against the full feed (`WalkOverrides::check_stations`).
     walks.validate().map_err(|m| Error::File {
         file: "walks.toml".into(),
         message: m,
     })?;
-    for w in &walks.walk {
-        for id in [&w.from, &w.to] {
-            if !clustering.stations.iter().any(|s| &s.id == id) {
-                return Err(Error::File {
-                    file: "walks.toml".into(),
-                    message: format!("unknown station {id:?}"),
-                });
-            }
-        }
-    }
     rules
         .validate()
         .map_err(|m| bad(format!("invalid rules: {m}")))?;

@@ -30,6 +30,7 @@ fn build(walks: &str) -> Result<(Network, BuildReport), String> {
         c.station_of_stop[feed.stop_index["S2a"] as usize],
     ];
     let walks: WalkOverrides = toml::from_str(walks).map_err(|e| e.to_string())?;
+    walks.check_stations(&c).map_err(|e| e.to_string())?;
     let rules = Rules {
         date: "2026-11-12".into(),
         ..Rules::default()

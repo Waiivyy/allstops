@@ -2,9 +2,9 @@
 //! versioned file that the same input always turns into the same bytes.
 //!
 //! A pack holds a subset of the feed (only the routes of the target and
-//! connector modes, their trips, stop times, services, stops and
-//! transfers), the stations after clustering and overrides, the targets and
-//! the walk overrides. The subset is cut from the GTFS rows and loaded by
+//! connector modes with their trips, stop times, stops and transfers, plus
+//! every service calendar), the stations after clustering and overrides,
+//! the targets and the walk overrides. The subset is cut from the GTFS rows and loaded by
 //! the normal loader, then stored as the loaded tables, so reading a pack
 //! gives exactly the [`Feed`] that loading the subset's rows would. Networks
 //! for any date, and for any rules that keep the pack's connector modes, are
@@ -261,16 +261,10 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
                 .collect(),
         });
     }
-    let kept_ids: HashSet<&str> = stations.iter().map(|s| s.id.as_str()).collect();
-    let walks = WalkOverrides {
-        walk: src
-            .walks
-            .walk
-            .iter()
-            .filter(|w| kept_ids.contains(w.from.as_str()) && kept_ids.contains(w.to.as_str()))
-            .cloned()
-            .collect(),
-    };
+    // Every entry is kept: one naming a station outside the pack matches no
+    // walk link, exactly as with the full feed.
+    src.walks.check_stations(c)?;
+    let walks = src.walks.clone();
     let targets: Vec<u32> = src.targets.iter().map(|&t| new_index[t as usize]).collect();
 
     let gtfs = subset_zip(src.zip, limits, &routes, &stops)?;
@@ -750,7 +744,7 @@ enum Keep<'a> {
     All,
     /// Rows whose value in this column is in the set.
     By(&'static str, &'a HashSet<String>),
-    /// As `By`, and remember two more columns of every kept row.
+    /// trips.txt rows of the kept routes; their trip IDs are remembered.
     Trips(&'a HashSet<String>),
     Transfers,
 }
@@ -781,7 +775,6 @@ fn subset_zip(
 ) -> Result<Vec<u8>> {
     let mut archive = Archive::open(zip, limits)?;
     let mut trips: HashSet<String> = HashSet::new();
-    let mut services: HashSet<String> = HashSet::new();
     let opts = SimpleFileOptions::DEFAULT
         .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(Some(6))
@@ -794,7 +787,8 @@ fn subset_zip(
             "routes.txt" => Keep::By("route_id", routes),
             "trips.txt" => Keep::Trips(routes),
             "stop_times.txt" | "frequencies.txt" => Keep::By("trip_id", &trips),
-            "calendar.txt" | "calendar_dates.txt" => Keep::By("service_id", &services),
+            // Every calendar row stays, so the feed's service range (and with
+            // it the accepted plan dates) is the same from a pack.
             "stops.txt" => Keep::By("stop_id", stops),
             "transfers.txt" => Keep::Transfers,
             _ => Keep::All,
@@ -804,11 +798,10 @@ fn subset_zip(
             let mut t = Table::new(name, r, max_rows)?;
             filter_table(&mut t, &keep, routes, &trips, stops)
         })?;
-        let Some((csv, kept_trips, kept_services)) = filtered else {
+        let Some((csv, kept_trips)) = filtered else {
             continue;
         };
         trips.extend(kept_trips);
-        services.extend(kept_services);
         w.start_file(name, opts).map_err(zip_err)?;
         w.write_all(&csv)
             .map_err(|e| pack_error(format!("writing the GTFS subset: {e}")))?;
@@ -817,14 +810,14 @@ fn subset_zip(
 }
 
 /// Copy the header and the kept rows of one table. For trips.txt, also
-/// return the trip and service IDs of the kept rows.
+/// return the trip IDs of the kept rows.
 fn filter_table(
     t: &mut Table,
     keep: &Keep,
     routes: &HashSet<String>,
     trips: &HashSet<String>,
     stops: &HashSet<String>,
-) -> Result<(Vec<u8>, Vec<String>, Vec<String>)> {
+) -> Result<(Vec<u8>, Vec<String>)> {
     let file = t.file().to_string();
     let mut out = csv::WriterBuilder::new()
         .flexible(true)
@@ -832,10 +825,10 @@ fn filter_table(
     let csv_err = |e: csv::Error| pack_error(format!("writing {file}: {e}"));
     out.write_record(t.headers()).map_err(csv_err)?;
     let col = |name: &str| t.column(name);
-    let (key, trip_col, service_col) = match keep {
-        Keep::By(c, _) => (col(c), None, None),
-        Keep::Trips(_) => (col("route_id"), col("trip_id"), col("service_id")),
-        _ => (None, None, None),
+    let (key, trip_col) = match keep {
+        Keep::By(c, _) => (col(c), None),
+        Keep::Trips(_) => (col("route_id"), col("trip_id")),
+        _ => (None, None),
     };
     let refs: Vec<(Option<usize>, &HashSet<String>)> = match keep {
         Keep::Transfers => vec![
@@ -849,7 +842,6 @@ fn filter_table(
         _ => Vec::new(),
     };
     let mut kept_trips = Vec::new();
-    let mut kept_services = Vec::new();
     while t.next_row()? {
         let keep_row = match keep {
             Keep::All => true,
@@ -871,14 +863,13 @@ fn filter_table(
         }
         if let Keep::Trips(_) = keep {
             kept_trips.push(t.get(trip_col)?.to_string());
-            kept_services.push(t.get(service_col)?.to_string());
         }
         out.write_byte_record(t.record()).map_err(csv_err)?;
     }
     let bytes = out
         .into_inner()
         .map_err(|e| pack_error(format!("writing {file}: {e}")))?;
-    Ok((bytes, kept_trips, kept_services))
+    Ok((bytes, kept_trips))
 }
 
 #[cfg(test)]

@@ -156,6 +156,7 @@ pub fn run(a: Args) -> Result<()> {
     rules.connector_modes = a.connector_modes.clone();
     let t = Instant::now();
     let clustering = crate::real::stations(&feed, &station_overrides)?;
+    walks.check_stations(&clustering)?;
     let targets = select(&feed, &clustering, &selection)?;
     let cal = ServiceCalendar::new(&feed);
     let (net, _report) = build_network(

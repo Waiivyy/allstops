@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cluster::Clustering;
+use crate::error::{Error, Result};
+
 fn yes() -> bool {
     true
 }
@@ -56,6 +59,25 @@ impl WalkOverrides {
                         "{} to {}: set seconds or forbid, not both or neither",
                         w.from, w.to
                     ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Error for the first entry naming a station that is not in
+    /// `clustering`, which is almost always a typo. Run it on the full feed's
+    /// stations; a pack holds fewer.
+    pub fn check_stations(&self, clustering: &Clustering) -> Result<()> {
+        let known: std::collections::HashSet<&str> =
+            clustering.stations.iter().map(|s| s.id.as_str()).collect();
+        for w in &self.walk {
+            for id in [&w.from, &w.to] {
+                if !known.contains(id.as_str()) {
+                    return Err(Error::File {
+                        file: "walks.toml".into(),
+                        message: format!("unknown station {id:?}"),
+                    });
                 }
             }
         }

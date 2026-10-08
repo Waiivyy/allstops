@@ -54,7 +54,7 @@ fn zip_with_transfers(transfers: &str) -> Vec<u8> {
         (
             "calendar.txt",
             "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n\
-             WD,1,1,1,1,1,0,0,20261001,20261213\nBUS,1,1,1,1,1,1,1,20261001,20261213\n",
+             WD,1,1,1,1,1,0,0,20261001,20261213\nBUS,1,1,1,1,1,1,1,20261001,20261231\n",
         ),
         (
             "calendar_dates.txt",
@@ -173,8 +173,9 @@ fn the_pack_keeps_what_plans_can_use_and_drops_the_rest() {
         !stops.contains(&"S4a") && !stops.contains(&"S4"),
         "{stops:?}"
     );
-    assert_eq!(p.feed.service_ids, vec!["WD".to_string()]);
-    assert_eq!(p.feed.calendar_dates.len(), 1);
+    // Every calendar row is kept, so the service range is the feed's.
+    assert_eq!(p.feed.calendars.len(), 2);
+    assert_eq!(p.feed.calendar_dates.len(), 2);
     assert_eq!(
         p.feed.transfers.len(),
         1,
@@ -247,8 +248,9 @@ fn a_network_from_the_pack_equals_one_from_the_feed() {
         );
         assert!(!from_pack.footpaths.is_empty());
     }
-    // The walk to a station outside the pack is dropped; the other is kept.
-    assert_eq!(p.walks.walk.len(), 1);
+    // Both walks are kept; the one to a station outside the pack matches no
+    // link, as with the feed.
+    assert_eq!(p.walks.walk, walks.walk);
 }
 
 #[test]
@@ -471,4 +473,76 @@ fn transfer_rows_for_routes_outside_the_network_do_not_apply() {
     let (a, b) = networks(&i, &p, "2026-11-12", &WalkOverrides::default());
     let s2 = a.stations.iter().position(|s| s.id == "S2").unwrap();
     assert_eq!((a.change_time[s2], b.change_time[s2]), (900, 900));
+}
+
+#[test]
+fn walk_entries_outside_the_pack_are_reported_as_with_the_feed() {
+    let walks: WalkOverrides = toml::from_str(
+        "[[walk]]\nfrom = \"S2\"\nto = \"S3\"\nseconds = 300\n[[walk]]\nfrom = \"S3\"\nto = \"S4\"\nforbid = true\n",
+    )
+    .unwrap();
+    let i = input();
+    let p = pack::read(&pack_of(&i, &walks), &Limits::default()).unwrap();
+    let rules = Rules {
+        date: "2026-11-12".into(),
+        connector_modes: vec!["tram".into()],
+        ..Rules::default()
+    };
+    let report = |feed: &Feed, c: &Clustering, t: &[u32], w: &WalkOverrides| {
+        build_network(feed, &ServiceCalendar::new(feed), c, t, &[1..=1], &rules, w)
+            .unwrap()
+            .1
+    };
+    let a = report(&i.feed, &i.clustering, &i.targets, &walks);
+    let b = report(&p.feed, &p.clustering, &p.targets, &p.walks);
+    assert_eq!(
+        (a.walk_overrides_applied, a.walk_overrides_unused),
+        (b.walk_overrides_applied, b.walk_overrides_unused)
+    );
+    assert_eq!((a.walk_overrides_applied, a.walk_overrides_unused), (2, 2));
+}
+
+#[test]
+fn a_walk_to_an_unknown_station_stops_the_pack() {
+    let walks: WalkOverrides =
+        toml::from_str("[[walk]]\nfrom = \"S1\"\nto = \"NOPE\"\nseconds = 60\n").unwrap();
+    let i = input();
+    let r = pack::build(
+        &PackSource {
+            zip: &i.zip,
+            feed: &i.feed,
+            clustering: &i.clustering,
+            targets: &i.targets,
+            visit_types: &[1],
+            connector_types: &[0..=0],
+            walks: &walks,
+            header: header(),
+        },
+        &Limits::default(),
+    );
+    assert!(r.unwrap_err().to_string().contains("NOPE"));
+}
+
+#[test]
+fn the_plan_date_range_is_the_feeds_without_declared_dates() {
+    // feed_info.txt here declares no dates, so the range comes from the
+    // calendars: the bus runs to 2026-12-31, the U-Bahn and tram only to
+    // 2026-12-13. A date in between is inside the feed's range either way.
+    let i = input();
+    let p = pack::read(&build(), &Limits::default()).unwrap();
+    let rules = Rules {
+        date: "2026-12-20".into(),
+        connector_modes: vec!["tram".into()],
+        ..Rules::default()
+    };
+    let ok = |feed: &Feed, c: &Clustering, t: &[u32], w: &WalkOverrides| {
+        build_network(feed, &ServiceCalendar::new(feed), c, t, &[1..=1], &rules, w).is_ok()
+    };
+    assert!(ok(
+        &i.feed,
+        &i.clustering,
+        &i.targets,
+        &WalkOverrides::default()
+    ));
+    assert!(ok(&p.feed, &p.clustering, &p.targets, &p.walks));
 }
