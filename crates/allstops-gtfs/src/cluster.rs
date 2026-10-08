@@ -395,6 +395,8 @@ pub enum OverrideError {
     IdTaken(String),
     #[error("station overrides: the split would leave station {0:?} empty")]
     WouldEmpty(String),
+    #[error("station overrides: the split into {0:?} names no stops")]
+    SplitNoStops(String),
 }
 
 /// Apply overrides to a clustering, with the default configuration for the
@@ -434,6 +436,9 @@ pub fn apply_overrides_with(
             .ok_or_else(|| OverrideError::UnknownStation(sp.station.clone()))?;
         if index.contains_key(&sp.id) {
             return Err(OverrideError::IdTaken(sp.id.clone()));
+        }
+        if sp.stops.is_empty() {
+            return Err(OverrideError::SplitNoStops(sp.id.clone()));
         }
         let ((orig, _), source) = slots[src].as_mut().expect("indexed slots are live");
         let mut moved = Vec::new();

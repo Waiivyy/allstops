@@ -143,6 +143,10 @@ fn mistakes_are_errors() {
             "Q",
         ),
         ("[[rename]]\nstation = \"nope\"\nname = \"x\"\n", "nope"),
+        (
+            "[[split]]\nstation = \"P\"\nstops = []\nid = \"X\"\n",
+            "no stops",
+        ),
     ];
     for (text, needle) in cases {
         let err = apply_overrides(&f, base.clone(), &parse(text))
