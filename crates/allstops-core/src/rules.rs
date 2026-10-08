@@ -24,6 +24,13 @@ pub struct MinTransfer {
 pub struct Rules {
     pub mode: Mode,
     pub selection: String,
+    /// Optional `stations.overrides.toml`, relative to the rules file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub station_overrides: Option<String>,
+    /// Optional `walks.toml` with measured or forbidden walks, relative to
+    /// the rules file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walks: Option<String>,
     /// Plan date, `YYYY-MM-DD`.
     pub date: String,
     /// `HH:MM`, on the plan date's service day; may exceed 24:00.
@@ -52,6 +59,8 @@ impl Default for Rules {
         Rules {
             mode: Mode::Stops,
             selection: "selection.toml".into(),
+            station_overrides: None,
+            walks: None,
             date: "2026-11-14".into(),
             earliest_start: "04:30".into(),
             latest_end: "26:00".into(),

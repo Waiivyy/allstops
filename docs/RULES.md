@@ -14,6 +14,8 @@ keeper's own guidelines for an attempt win over this page.
 |---|---|---|
 | `mode` | `"stops"` | Every target station must be visited. (`"segments"`, riding every segment, is a stretch goal.) |
 | `selection` | | Path to the selection file that defines the target stations (relative to the rules file). |
+| `station_overrides` | none | Optional path to a station overrides file (relative to the rules file). See below. |
+| `walks` | none | Optional path to a walks file with measured or forbidden walks (relative to the rules file). See below. |
 | `date` | | Plan date, `YYYY-MM-DD`. Must lie inside the feed's validity range. |
 | `earliest_start` | `04:30` | Earliest first visit, as a clock time of the plan date's service day. |
 | `latest_end` | `26:00` | Latest last visit; may pass 24:00 (26:00 is 02:00 the next morning). |
@@ -33,7 +35,7 @@ keeper's own guidelines for an attempt win over this page.
 The defaults are deliberately conservative. They are planning assumptions, not
 measurements, and a real runner should check them against their own pace and
 the stations on the route. Walk links are straight-line approximations unless
-overridden with measured times (`walks.toml`, planned for Stage 1).
+a walks file replaces them with measured times.
 
 Rules are checked before any work starts, and every problem is reported at
 once: the date must be `YYYY-MM-DD`, the window must end after it starts and
@@ -43,6 +45,69 @@ minimums between 1 second and one day, and connector modes must be known.
 Transfer minimums must be at least one second because a change or walk taking
 no time would let connections at the same instant chain in an order the
 search does not model.
+
+## Override files
+
+Both files are optional, named in the rules file, and kept per network in
+`data/overrides/`. Unknown keys are errors, so a typo never silently does
+nothing. The examples below show the syntax only; the Munich rules use
+neither file.
+
+**Station overrides** change the automatic clustering (`docs/DATA.md`). They
+apply in a fixed order, whatever the order in the file: splits, then merges,
+then renames, so a merge can name a station that a split created.
+
+```toml
+[[split]]                     # move stops into a new station
+station = "de:09162:1"
+stops = ["de:09162:1:1:1", "de:09162:1:2:2"]
+id = "karlsplatz-tram"
+name = "Karlsplatz Tram"      # optional; defaults to a moved stop's name
+note = "why"
+
+[[merge]]                     # join stations; the first ID is kept
+stations = ["de:09162:670", "de:09162:671"]
+id = "arabellapark"           # optional new ID
+name = "Arabellapark"         # optional new name
+note = "why"
+
+[[rename]]
+station = "de:09162:6"
+name = "Hauptbahnhof"
+note = "why"
+```
+
+Unknown stations, stops that are not in the station being split, an ID that is
+already taken, a merge of fewer than two stations and a split that would leave
+a station without stops are errors. Every stop moved by an override records
+`override` as its merge reason in `stations.json`.
+
+**Walks** replace the estimate of a walk link between two stations with a
+measured time, or forbid the walk:
+
+```toml
+[[walk]]
+from = "de:09162:60"
+to = "de:09162:70"
+seconds = 540                 # measured; replaces the estimate
+both_ways = true              # default; false applies from -> to only
+note = "who measured it, when, and which way"
+
+[[walk]]
+from = "de:09162:6"
+to = "de:09162:1"
+forbid = true
+```
+
+Each entry sets exactly one of `seconds` (1 to 86,400) or `forbid`. A measured
+time is still raised to `min_transfer_s.walk_link`, and to a longer
+`transfers.txt` minimum where one applies. An override never creates a walk:
+it applies only to a link within `max_walk_m`, and `allstops solve` reports
+entries that matched no link. When two entries cover the same direction, the
+later one applies. The verifier reads the same file and rejects a forbidden
+walk (`WALK_FORBIDDEN`) or one faster than the measured time. An itinerary
+planned with either file can only be verified with `--rules`, because the
+files are named relative to the rules file.
 
 ## What counts as a visit
 

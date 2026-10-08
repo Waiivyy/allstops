@@ -68,8 +68,12 @@ times going backwards, no unknown references.
 Clustering (`allstops stations`) groups every stop under its `parent_station`;
 the DHID prefix rule never needs to merge anything in this feed. 9,309
 stations. The clustering reports 31 pairs of same-named stations more than
-1 km apart and 34 pairs of differently named stations under 50 m apart, for
-review with overrides in Stage 1.
+1 km apart and 34 pairs of differently named stations under 50 m apart. Only
+one of these 65 pairs includes a U-Bahn station: Arabellapark
+(`de:09162:670`, the U4 terminus) and the Arabellapark Nord bus stop
+(`de:09162:671`), 48 m apart. They stay separate, so changing between them
+counts as a walk with its two-minute minimum rather than a one-minute change
+inside one station. The Munich rules use no station overrides.
 
 The Munich U-Bahn selection (`data/selections/mvv-ubahn.toml`, every station
 with a scheduled `route_type = 1` stop) gives **96 stations**: 93 in Munich

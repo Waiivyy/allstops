@@ -5,6 +5,7 @@ use allstops_gtfs::calendar::ServiceCalendar;
 use allstops_gtfs::cluster::Clustering;
 use allstops_gtfs::feed::Feed;
 use allstops_gtfs::select::{Selection, select};
+use allstops_gtfs::walks::WalkOverrides;
 use allstops_verify::{Context, Report, RulesIn, parse, verify};
 use anyhow::Result;
 
@@ -20,6 +21,7 @@ pub fn check_json(
     feed: &Feed,
     clustering: &Clustering,
     selection: &Selection,
+    walks: &WalkOverrides,
     expected_rules: Option<&RulesIn>,
     feed_sha256: Option<&str>,
     json: &str,
@@ -38,6 +40,7 @@ pub fn check_json(
         visit_types: &types,
         feed_sha256,
         expected_rules,
+        walks,
     };
     let it = parse(json)?;
     Ok(verify(&ctx, &it))

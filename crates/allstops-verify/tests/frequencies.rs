@@ -28,6 +28,7 @@ fn check(trip: &str, board: &str, alight: &str) -> Vec<&'static str> {
         visit_types: &[1..=1],
         feed_sha256: None,
         expected_rules: None,
+        walks: &Default::default(),
     };
     let doc = json!({
         "schema": "allstops-itinerary/0",

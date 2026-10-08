@@ -14,7 +14,6 @@ use std::time::Instant;
 
 use allstops_core::network::Network;
 use allstops_gtfs::calendar::ServiceCalendar;
-use allstops_gtfs::cluster::{ClusterConfig, cluster};
 use allstops_gtfs::network::build_network;
 use allstops_gtfs::select::select;
 use anyhow::{Context, Result, ensure};
@@ -165,7 +164,7 @@ pub fn run(a: Args) -> Result<()> {
 /// Build the network a second time from the loaded feed, with fresh
 /// clustering and hash map state, to see whether a pack is reproducible.
 fn rebuild(real: &Real) -> Result<Network> {
-    let clustering = cluster(&real.feed, &ClusterConfig::default());
+    let clustering = crate::real::stations(&real.feed, &real.stations)?;
     let targets = select(&real.feed, &clustering, &real.selection)?;
     let cal = ServiceCalendar::new(&real.feed);
     let (network, _) = build_network(
@@ -175,6 +174,7 @@ fn rebuild(real: &Real) -> Result<Network> {
         &targets,
         &visit_types(&real.feed, &real.selection)?,
         &real.rules,
+        &real.walks,
     )?;
     Ok(network)
 }

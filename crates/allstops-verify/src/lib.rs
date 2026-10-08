@@ -15,6 +15,7 @@ use allstops_gtfs::calendar::{ServiceCalendar, service_day_origin};
 use allstops_gtfs::cluster::{Clustering, distance_m};
 use allstops_gtfs::feed::{Feed, StopTime};
 use allstops_gtfs::time::parse_time;
+use allstops_gtfs::walks::WalkOverrides;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -141,6 +142,8 @@ pub struct Context<'a> {
     /// rules must match them (RULES_MISMATCH otherwise) and these are the
     /// rules checked; when absent, the embedded rules are checked.
     pub expected_rules: Option<&'a RulesIn>,
+    /// Measured and forbidden walks (`walks.toml`) the plan was made with.
+    pub walks: &'a WalkOverrides,
 }
 
 /// GTFS route types for a connector mode name (basic and extended types).
@@ -713,9 +716,24 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                         format!("{d:.0} m is over the {} m limit", r.max_walk_m),
                     );
                 }
+                // walks.toml: the last entry covering this direction applies.
+                let measured = ctx.walks.walk.iter().rev().find(|w| {
+                    (w.from == *from_station && w.to == *to_station)
+                        || (w.both_ways && w.from == *to_station && w.to == *from_station)
+                });
+                if measured.is_some_and(|w| w.forbid) {
+                    push(
+                        "WALK_FORBIDDEN",
+                        li_,
+                        format!("walks.toml forbids walking from {from_station} to {to_station}"),
+                    );
+                }
                 let speed = r.walking_speed_kmh / 3.6;
-                let need = ((d * r.walk_detour_factor / speed).ceil() as i64)
-                    .max(r.min_transfer_s.walk_link);
+                let need = match measured.and_then(|w| w.seconds) {
+                    Some(m) => i64::from(m),
+                    None => (d * r.walk_detour_factor / speed).ceil() as i64,
+                }
+                .max(r.min_transfer_s.walk_link);
                 if d.is_finite() && e - s < need {
                     push(
                         "WALK_TOO_FAST",

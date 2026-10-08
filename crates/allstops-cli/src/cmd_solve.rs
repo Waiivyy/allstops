@@ -135,6 +135,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         &input.feed,
         &input.clustering,
         &input.selection,
+        &input.walks,
         Some(&rules_for_verifier(&input.rules)?),
         Some(&input.feed_sha256),
         &doc,

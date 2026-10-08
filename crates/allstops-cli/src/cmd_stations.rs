@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use allstops_gtfs::cluster::{ClusterConfig, MergeReason, cluster};
+use allstops_gtfs::cluster::{MergeReason, StationOverrides};
 use allstops_gtfs::select::{Selection, select};
 use allstops_gtfs::{Feed, Limits};
 use anyhow::{Context, Result};
@@ -15,6 +15,9 @@ pub struct Args {
     /// Selection file; prints the selected target stations.
     #[arg(long)]
     selection: Option<PathBuf>,
+    /// Station overrides (merge, split, rename) applied after clustering.
+    #[arg(long)]
+    overrides: Option<PathBuf>,
     /// Write all stations with their member stops and merge reasons here.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -25,7 +28,14 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
     let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
     let attribution = crate::plan_input::feed_ref(&bytes, &feed).attribution;
-    let c = cluster(&feed, &ClusterConfig::default());
+    let overrides: StationOverrides = match &args.overrides {
+        Some(p) => toml::from_str(
+            &std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?,
+        )
+        .with_context(|| format!("parsing {}", p.display()))?,
+        None => StationOverrides::default(),
+    };
+    let c = crate::plan_input::stations(&feed, &overrides)?;
 
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     for s in &c.stations {

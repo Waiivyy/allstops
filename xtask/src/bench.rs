@@ -22,16 +22,17 @@ use allstops_core::oracle;
 use allstops_core::plan::{Best, best_greedy, greedy_from, greedy_jobs, transfer_slacks};
 use allstops_core::rules::{Rules, parse_clock};
 use allstops_gtfs::calendar::ServiceCalendar;
-use allstops_gtfs::cluster::{ClusterConfig, Clustering, cluster};
+use allstops_gtfs::cluster::Clustering;
 use allstops_gtfs::network::build_network;
 use allstops_gtfs::select::{Rule, Selection, select};
+use allstops_gtfs::walks::WalkOverrides;
 use allstops_gtfs::{Feed, Limits};
 use allstops_verify::{Report, parse, verify};
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::real::{load_rules, visit_types};
+use crate::real::{RuleFiles, load_rules, visit_types};
 use crate::synth::{self, Shape, Size};
 
 /// Start times tried per start station and the step between them: the
@@ -194,6 +195,7 @@ fn check_json(
     feed: &Feed,
     clustering: &Clustering,
     selection: &Selection,
+    walks: &WalkOverrides,
     rules: &Rules,
     feed_sha256: Option<&str>,
     json: &str,
@@ -213,6 +215,7 @@ fn check_json(
         visit_types: &types,
         feed_sha256,
         expected_rules: Some(&expected),
+        walks,
     };
     let it = parse(json)?;
     Ok(verify(&ctx, &it))
@@ -222,18 +225,19 @@ fn check_json(
 fn verify_route(
     src: &Source,
     clustering: &Clustering,
-    selection: &Selection,
-    rules: &Rules,
+    files: &RuleFiles,
     net: &Network,
     best: &Best,
 ) -> Result<(Itinerary, Report)> {
+    let rules = &files.rules;
     let it = to_itinerary(net, &best.plan, rules, src.feed_ref.clone(), &src.timezone)
         .context("internal error: a greedy plan does not visit every target")?;
     let json = serde_json::to_string_pretty(&it)?;
     let report = check_json(
         &src.feed,
         clustering,
-        selection,
+        &files.selection,
+        &files.walks,
         rules,
         Some(&src.sha256),
         &json,
@@ -274,15 +278,10 @@ fn start_stations(net: &Network, rules: &Rules) -> Result<Vec<StationIdx>> {
 }
 
 /// Build the network for `rules.date` and measure everything on it.
-fn run_instance(
-    src: &Source,
-    selection: &Selection,
-    rules: &Rules,
-    with_optimum: bool,
-    row: &mut Row,
-) -> Result<()> {
+fn run_instance(src: &Source, files: &RuleFiles, with_optimum: bool, row: &mut Row) -> Result<()> {
+    let (selection, rules) = (&files.selection, &files.rules);
     let t = Instant::now();
-    let clustering = cluster(&src.feed, &ClusterConfig::default());
+    let clustering = crate::real::stations(&src.feed, &files.stations)?;
     let targets = select(&src.feed, &clustering, selection)?;
     let cal = ServiceCalendar::new(&src.feed);
     let (net, report) = build_network(
@@ -292,6 +291,7 @@ fn run_instance(
         &targets,
         &visit_types(&src.feed, selection)?,
         rules,
+        &files.walks,
     )?;
     row.build_ms = ms(t);
     row.date = rules.date.clone();
@@ -309,7 +309,7 @@ fn run_instance(
     let ws = parse_clock(&rules.earliest_start).context("unreadable earliest_start")?;
     let times: Vec<Time> = (0..START_COUNT).map(|k| ws + k * START_STEP_S).collect();
     row.greedy_runs = starts.len() * times.len();
-    let check = |b: &Best| verify_route(src, &clustering, selection, rules, &net, b);
+    let check = |b: &Best| verify_route(src, &clustering, files, &net, b);
 
     // Time to the first verified route.
     let t = Instant::now();
@@ -439,14 +439,13 @@ pub fn run_synthetic(seed: u64, size: Size) -> Result<Row> {
         seed: Some(seed),
         ..Row::default()
     };
-    run_instance(
-        &src,
-        &synthetic_selection(),
-        &synthetic_rules(),
-        size == Size::Tiny,
-        &mut row,
-    )
-    .with_context(|| row.name.clone())?;
+    let files = RuleFiles {
+        rules: synthetic_rules(),
+        selection: synthetic_selection(),
+        stations: Default::default(),
+        walks: Default::default(),
+    };
+    run_instance(&src, &files, size == Size::Tiny, &mut row).with_context(|| row.name.clone())?;
     if row.targets != s.shape.metro_stations {
         row.problems.push(format!(
             "the generator made {} metro stations, the selection found {} targets",
@@ -555,7 +554,7 @@ fn run_real(
     };
     let bytes = std::fs::read(&zip).with_context(|| format!("reading {}", zip.display()))?;
     let src = load_source(&bytes, &net.id)?;
-    let (rules, selection) = load_rules(&root.join(&net.rules))?;
+    let files = load_rules(&root.join(&net.rules))?;
     notes.push(format!(
         "{}: feed sha256 `{}`, feed version {}, parsed in {:.0} ms; rules `{}`.",
         net.name,
@@ -570,16 +569,19 @@ fn run_real(
     ));
     for date in &net.dates {
         eprintln!("{}: {date}", net.name);
-        let rules = Rules {
-            date: date.clone(),
-            ..rules.clone()
+        let files = RuleFiles {
+            rules: Rules {
+                date: date.clone(),
+                ..files.rules.clone()
+            },
+            ..files.clone()
         };
         let mut row = Row {
             group: net.id.clone(),
             name: net.name.clone(),
             ..Row::default()
         };
-        run_instance(&src, &selection, &rules, false, &mut row)
+        run_instance(&src, &files, false, &mut row)
             .with_context(|| format!("{} on {date}", net.name))?;
         rows.push(row);
     }

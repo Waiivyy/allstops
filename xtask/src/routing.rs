@@ -3,18 +3,17 @@
 //! early-terminating scan the greedy runs. Single-threaded.
 
 use std::hint::black_box;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use allstops_core::builder::random::Lcg;
 use allstops_core::csa::{Csa, Origin};
 use allstops_core::network::{INF, StationIdx, Time};
 use allstops_core::raptor::Raptor;
-use allstops_core::rules::{Rules, parse_clock};
+use allstops_core::rules::parse_clock;
 use allstops_gtfs::calendar::ServiceCalendar;
-use allstops_gtfs::cluster::{ClusterConfig, cluster};
 use allstops_gtfs::network::build_network;
-use allstops_gtfs::select::{Selection, select};
+use allstops_gtfs::select::select;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
@@ -147,22 +146,16 @@ pub fn run(a: Args) -> Result<()> {
         bail!("--queries must be at least 1 and --span-h not negative");
     }
     let (feed, _bytes, feed_load_ms) = crate::real::load_feed(&a.zip)?;
-    let text = std::fs::read_to_string(&a.rules)
-        .with_context(|| format!("reading {}", a.rules.display()))?;
-    let mut rules: Rules = toml::from_str(&text)?;
+    let crate::real::RuleFiles {
+        mut rules,
+        selection,
+        stations: station_overrides,
+        walks,
+    } = crate::real::load_rules(&a.rules)?;
     rules.date = a.date.clone();
     rules.connector_modes = a.connector_modes.clone();
-    let sel_path = a
-        .rules
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(&rules.selection);
-    let selection: Selection = toml::from_str(
-        &std::fs::read_to_string(&sel_path)
-            .with_context(|| format!("reading {}", sel_path.display()))?,
-    )?;
     let t = Instant::now();
-    let clustering = cluster(&feed, &ClusterConfig::default());
+    let clustering = crate::real::stations(&feed, &station_overrides)?;
     let targets = select(&feed, &clustering, &selection)?;
     let cal = ServiceCalendar::new(&feed);
     let (net, _report) = build_network(
@@ -172,6 +165,7 @@ pub fn run(a: Args) -> Result<()> {
         &targets,
         &crate::real::visit_types(&feed, &selection)?,
         &rules,
+        &walks,
     )?;
     let network_build_ms = t.elapsed().as_secs_f64() * 1e3;
 

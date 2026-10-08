@@ -160,7 +160,15 @@ fn pipeline(bytes: &[u8]) {
         return;
     };
     let cal = ServiceCalendar::new(&feed);
-    let _ = build_network(&feed, &cal, &c, &targets, &[1..=1], &Rules::default());
+    let _ = build_network(
+        &feed,
+        &cal,
+        &c,
+        &targets,
+        &[1..=1],
+        &Rules::default(),
+        &Default::default(),
+    );
 }
 
 fn cases() -> u32 {

@@ -13,6 +13,7 @@ use crate::calendar::{ServiceCalendar, check_plan_date, day_offset};
 use crate::cluster::{Clustering, distance_m};
 use crate::error::{Error, Result};
 use crate::feed::Feed;
+pub use crate::walks::{WalkOverride, WalkOverrides};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BuildReport {
@@ -33,6 +34,11 @@ pub struct BuildReport {
     pub stations_with_transfer_minimum: usize,
     /// Walk links that transfers.txt made longer.
     pub walks_with_transfer_minimum: usize,
+    /// Directed walk links whose time or existence walks.toml set.
+    pub walk_overrides_applied: usize,
+    /// Directed walks.toml entries that matched no generated link (the
+    /// stations are farther apart than max_walk_m, or not in the network).
+    pub walk_overrides_unused: usize,
 }
 
 /// More walk links than this from one station means the coordinates are
@@ -74,11 +80,26 @@ pub fn build_network(
     targets: &[u32],
     visit_types: &[RangeInclusive<u16>],
     rules: &Rules,
+    walks: &WalkOverrides,
 ) -> Result<(Network, BuildReport)> {
     let bad = |m: String| Error::File {
         file: "rules".into(),
         message: m,
     };
+    walks.validate().map_err(|m| Error::File {
+        file: "walks.toml".into(),
+        message: m,
+    })?;
+    for w in &walks.walk {
+        for id in [&w.from, &w.to] {
+            if !clustering.stations.iter().any(|s| &s.id == id) {
+                return Err(Error::File {
+                    file: "walks.toml".into(),
+                    message: format!("unknown station {id:?}"),
+                });
+            }
+        }
+    }
     rules
         .validate()
         .map_err(|m| bad(format!("invalid rules: {m}")))?;
@@ -250,8 +271,27 @@ pub fn build_network(
     }
 
     let mut network = b.build();
+    let mut walk_overrides: HashMap<(StationIdx, StationIdx), Option<i32>> = HashMap::new();
+    let mut walk_overrides_unused = 0;
+    for ((from, to), v) in walks.directed() {
+        let net_idx = |id: &str| {
+            clustering
+                .stations
+                .iter()
+                .position(|s| s.id == id)
+                .and_then(|cs| station_map.get(&(cs as u32)).copied())
+        };
+        match (net_idx(&from), net_idx(&to)) {
+            (Some(a), Some(z)) => {
+                walk_overrides.insert((a, z), v);
+            }
+            _ => walk_overrides_unused += 1,
+        }
+    }
+    let mut walk_overrides_applied = 0;
     if rules.allow_walking {
-        add_footpaths(&mut network, rules)?;
+        walk_overrides_applied = add_footpaths(&mut network, rules, &walk_overrides)?;
+        walk_overrides_unused += walk_overrides.len() - walk_overrides_applied;
     }
     let (stations_raised, walks_raised) =
         apply_transfers(feed, clustering, &station_map, &mut network)?;
@@ -295,6 +335,8 @@ pub fn build_network(
         trips_skipped_too_long: skipped_too_long,
         stations_with_transfer_minimum: stations_raised,
         walks_with_transfer_minimum: walks_raised,
+        walk_overrides_applied,
+        walk_overrides_unused,
     };
     Ok((network, report))
 }
@@ -360,15 +402,21 @@ fn apply_transfers(
 }
 
 /// Generate walking links between every pair of network stations within
-/// `rules.max_walk_m` straight-line distance.
-fn add_footpaths(network: &mut Network, rules: &Rules) -> Result<()> {
+/// `rules.max_walk_m` straight-line distance, applying walks.toml overrides
+/// (keyed by network station). Returns how many overrides matched a link.
+fn add_footpaths(
+    network: &mut Network,
+    rules: &Rules,
+    overrides: &HashMap<(StationIdx, StationIdx), Option<i32>>,
+) -> Result<usize> {
     let max = rules.max_walk_m;
     let n = network.stations.len();
     if max < 1.0 {
         network.fp_start = vec![0; n + 1];
         network.footpaths = Vec::new();
-        return Ok(());
+        return Ok(0);
     }
+    let mut applied = 0usize;
     // Grid of cells at least `max` metres across in both directions, so
     // every pair within `max` lies in neighbouring cells. One longitude
     // width for the whole network, sized for its most poleward station.
@@ -419,9 +467,20 @@ fn add_footpaths(network: &mut Network, rules: &Rules) -> Result<()> {
                         if per_station[i].len() >= MAX_WALKS_PER_STATION {
                             return Err(too_dense(i));
                         }
+                        let duration = match overrides.get(&(i as StationIdx, j)) {
+                            Some(None) => {
+                                applied += 1;
+                                continue;
+                            }
+                            Some(Some(measured)) => {
+                                applied += 1;
+                                (*measured).max(rules.min_transfer_s.walk_link)
+                            }
+                            None => walk_duration(d, rules),
+                        };
                         per_station[i].push(net::Footpath {
                             to: j,
-                            duration: walk_duration(d, rules),
+                            duration,
                             metres: d as f32,
                         });
                         total += 1;
@@ -447,7 +506,7 @@ fn add_footpaths(network: &mut Network, rules: &Rules) -> Result<()> {
     }
     network.fp_start = fp_start;
     network.footpaths = footpaths;
-    Ok(())
+    Ok(applied)
 }
 
 #[cfg(test)]
@@ -487,7 +546,15 @@ mod tests {
                 date: d.into(),
                 ..Rules::default()
             };
-            let r = build_network(&feed, &cal, &c, &targets, &[1..=1], &rules);
+            let r = build_network(
+                &feed,
+                &cal,
+                &c,
+                &targets,
+                &[1..=1],
+                &rules,
+                &WalkOverrides::default(),
+            );
             assert_eq!(r.is_ok(), ok, "{d}: {:?}", r.err());
         }
     }
@@ -509,7 +576,15 @@ mod tests {
             exclude_stations: vec![],
         };
         let targets = crate::select::select(&feed, &c, &sel).unwrap();
-        build_network(&feed, &cal, &c, &targets, &[1..=1], &rules)
+        build_network(
+            &feed,
+            &cal,
+            &c,
+            &targets,
+            &[1..=1],
+            &rules,
+            &WalkOverrides::default(),
+        )
     }
 
     fn rules(date: &str) -> Rules {

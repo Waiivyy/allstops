@@ -15,6 +15,7 @@ pub mod network;
 pub mod select;
 pub mod table;
 pub mod time;
+pub mod walks;
 
 pub use error::{Error, LimitKind, Result};
 pub use feed::Feed;

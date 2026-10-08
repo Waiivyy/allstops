@@ -5,6 +5,7 @@ use allstops_gtfs::calendar::ServiceCalendar;
 use allstops_gtfs::cluster::{ClusterConfig, cluster};
 use allstops_gtfs::fixture::minimal_with;
 use allstops_gtfs::select::{Rule, Selection, select};
+use allstops_gtfs::walks::{WalkOverride, WalkOverrides};
 use allstops_gtfs::{Feed, Limits};
 use allstops_verify::{Context, parse, verify};
 use serde_json::{Value, json};
@@ -98,6 +99,15 @@ fn check_with(doc: &Value, transfers: &str) -> Vec<&'static str> {
 }
 
 fn check_full(doc: &Value, transfers: &str, expected: Option<Value>) -> Vec<&'static str> {
+    check_all(doc, transfers, expected, &WalkOverrides::default())
+}
+
+fn check_all(
+    doc: &Value,
+    transfers: &str,
+    expected: Option<Value>,
+    walks: &WalkOverrides,
+) -> Vec<&'static str> {
     let feed = feed_with_transfers(transfers);
     let expected: Option<allstops_verify::RulesIn> =
         expected.map(|v| serde_json::from_value(v).expect("rules parse"));
@@ -124,6 +134,7 @@ fn check_full(doc: &Value, transfers: &str, expected: Option<Value>) -> Vec<&'st
         visit_types: &[1..=1],
         feed_sha256: Some("abc"),
         expected_rules: expected.as_ref(),
+        walks,
     };
     let it = parse(&doc.to_string()).expect("parses");
     let mut codes = verify(&ctx, &it).codes();
@@ -421,4 +432,84 @@ fn pinned_rules_must_match_and_are_the_ones_checked() {
         check_full(&valid(), DEFAULT_TRANSFERS, Some(slow)),
         vec!["RULES_MISMATCH", "WALK_TOO_FAST"]
     );
+}
+
+// ---- walks.toml -----------------------------------------------------------
+
+fn walk_rule(
+    from: &str,
+    to: &str,
+    seconds: Option<i32>,
+    forbid: bool,
+    both_ways: bool,
+) -> WalkOverride {
+    WalkOverride {
+        from: from.into(),
+        to: to.into(),
+        seconds,
+        forbid,
+        both_ways,
+        note: String::new(),
+    }
+}
+
+fn check_walks(doc: &Value, rules: Vec<WalkOverride>) -> Vec<&'static str> {
+    check_all(doc, DEFAULT_TRANSFERS, None, &WalkOverrides { walk: rules })
+}
+
+/// valid() with the C to D walk ending `secs` seconds after it starts.
+fn walk_taking(secs: i64) -> Value {
+    let mut d = valid();
+    let end = 8 * 3600 + 11 * 60 + secs;
+    d["legs"][1]["end"] = json!(format!(
+        "{:02}:{:02}:{:02}",
+        end / 3600,
+        end / 60 % 60,
+        end % 60
+    ));
+    d
+}
+
+#[test]
+fn a_measured_walk_time_replaces_the_estimate() {
+    // The estimate for the 300 m walk is 313 s.
+    let fast = walk_taking(210);
+    assert_eq!(check(&fast), vec!["WALK_TOO_FAST"]);
+    let measured = vec![walk_rule("D", "C", Some(200), false, true)];
+    assert_eq!(
+        check_walks(&fast, measured),
+        Vec::<&str>::new(),
+        "both ways by default"
+    );
+    // A measured time longer than the estimate makes the walk slower.
+    let slow = vec![walk_rule("C", "D", Some(400), false, false)];
+    assert_eq!(check_walks(&valid(), slow), vec!["WALK_TOO_FAST"]);
+}
+
+#[test]
+fn a_measured_time_never_goes_below_the_walk_link_minimum() {
+    let quick = vec![walk_rule("C", "D", Some(30), false, true)];
+    assert_eq!(
+        check_walks(&walk_taking(60), quick.clone()),
+        vec!["WALK_TOO_FAST"]
+    );
+    assert_eq!(check_walks(&walk_taking(120), quick), Vec::<&str>::new());
+}
+
+#[test]
+fn a_forbidden_walk_is_rejected() {
+    let forbid = vec![walk_rule("C", "D", None, true, true)];
+    assert_eq!(check_walks(&valid(), forbid), vec!["WALK_FORBIDDEN"]);
+    // One way only: forbidding D to C leaves C to D allowed.
+    let other_way = vec![walk_rule("D", "C", None, true, false)];
+    assert_eq!(check_walks(&valid(), other_way), Vec::<&str>::new());
+}
+
+#[test]
+fn the_last_entry_for_a_direction_wins() {
+    let rules = vec![
+        walk_rule("C", "D", None, true, true),
+        walk_rule("D", "C", Some(200), false, true),
+    ];
+    assert_eq!(check_walks(&walk_taking(210), rules), Vec::<&str>::new());
 }

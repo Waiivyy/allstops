@@ -8,11 +8,15 @@ use std::time::Instant;
 use allstops_core::network::Network;
 use allstops_core::rules::Rules;
 use allstops_gtfs::calendar::ServiceCalendar;
-use allstops_gtfs::cluster::{ClusterConfig, Clustering, cluster};
+use allstops_gtfs::cluster::{
+    ClusterConfig, Clustering, StationOverrides, apply_overrides, cluster,
+};
 use allstops_gtfs::network::{BuildReport, build_network};
 use allstops_gtfs::select::{Selection, select, visit_route_types};
+use allstops_gtfs::walks::WalkOverrides;
 use allstops_gtfs::{Feed, Limits};
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
 
 use crate::style;
 
@@ -20,7 +24,8 @@ use crate::style;
 pub struct PlanArgs {
     /// Path to a GTFS zip.
     pub zip: PathBuf,
-    /// Rules file (TOML). Its `selection` path is relative to the rules file.
+    /// Rules file (TOML). Its `selection`, `station_overrides` and `walks`
+    /// paths are relative to the rules file.
     #[arg(long)]
     pub rules: PathBuf,
     /// Override the plan date (YYYY-MM-DD).
@@ -33,6 +38,7 @@ pub struct PlanInput {
     pub clustering: Clustering,
     pub rules: Rules,
     pub selection: Selection,
+    pub walks: WalkOverrides,
     pub network: Network,
     pub report: BuildReport,
     pub load_ms: f64,
@@ -42,26 +48,55 @@ pub struct PlanInput {
     pub timezone: String,
 }
 
-pub fn load_rules(path: &Path, date: Option<&str>) -> Result<(Rules, Selection)> {
+/// A rules file and the files it names.
+pub struct RuleFiles {
+    pub rules: Rules,
+    pub selection: Selection,
+    pub stations: StationOverrides,
+    pub walks: WalkOverrides,
+}
+
+fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut rules: Rules =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Read a rules file and the selection and override files it names
+/// (relative to the rules file), and check them.
+pub fn load_rules(path: &Path, date: Option<&str>) -> Result<RuleFiles> {
+    let mut rules: Rules = read_toml(path)?;
     if let Some(d) = date {
         rules.date = d.to_string();
     }
     rules
         .validate()
         .map_err(|m| anyhow::anyhow!("invalid rules in {}:\n{m}", path.display()))?;
-    let sel_path = path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(&rules.selection);
-    let sel_text = std::fs::read_to_string(&sel_path)
-        .with_context(|| format!("reading {}", sel_path.display()))?;
-    let selection: Selection =
-        toml::from_str(&sel_text).with_context(|| format!("parsing {}", sel_path.display()))?;
-    Ok((rules, selection))
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let selection = read_toml(&dir.join(&rules.selection))?;
+    let stations = match &rules.station_overrides {
+        Some(rel) => read_toml(&dir.join(rel))?,
+        None => StationOverrides::default(),
+    };
+    let walks: WalkOverrides = match &rules.walks {
+        Some(rel) => read_toml(&dir.join(rel))?,
+        None => WalkOverrides::default(),
+    };
+    walks
+        .validate()
+        .map_err(|m| anyhow::anyhow!("invalid walks file: {m}"))?;
+    Ok(RuleFiles {
+        rules,
+        selection,
+        stations,
+        walks,
+    })
+}
+
+/// Stations: automatic clustering, then the overrides.
+pub fn stations(feed: &Feed, overrides: &StationOverrides) -> Result<Clustering> {
+    apply_overrides(feed, cluster(feed, &ClusterConfig::default()), overrides)
+        .context("applying the station overrides")
 }
 
 /// Route types whose trips count as visits: those of the routes the
@@ -109,7 +144,12 @@ pub fn feed_ref(bytes: &[u8], feed: &Feed) -> allstops_core::itinerary::FeedRef 
 }
 
 pub fn load(args: &PlanArgs) -> Result<PlanInput> {
-    let (rules, selection) = load_rules(&args.rules, args.date.as_deref())?;
+    let RuleFiles {
+        rules,
+        selection,
+        stations: station_overrides,
+        walks,
+    } = load_rules(&args.rules, args.date.as_deref())?;
     let t0 = Instant::now();
     let bytes =
         std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
@@ -119,7 +159,7 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
     let feed_sha256 = feed_ref.sha256.clone();
     let timezone = feed.timezone()?.name().to_string();
     let t1 = Instant::now();
-    let clustering = cluster(&feed, &ClusterConfig::default());
+    let clustering = stations(&feed, &station_overrides)?;
     let targets = select(&feed, &clustering, &selection)?;
     let cal = ServiceCalendar::new(&feed);
     let (network, report) = build_network(
@@ -129,6 +169,7 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
         &targets,
         &visit_types(&feed, &selection)?,
         &rules,
+        &walks,
     )?;
     let build_ms = t1.elapsed().as_secs_f64() * 1e3;
     eprintln!(
@@ -143,11 +184,21 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
             report.targets
         ))
     );
+    if !walks.walk.is_empty() {
+        eprintln!(
+            "{}",
+            style::dim(&format!(
+                "walks file: {} walk links set, {} entries matched no walk link within {} m",
+                report.walk_overrides_applied, report.walk_overrides_unused, rules.max_walk_m
+            ))
+        );
+    }
     Ok(PlanInput {
         feed,
         clustering,
         rules,
         selection,
+        walks,
         network,
         report,
         load_ms,
