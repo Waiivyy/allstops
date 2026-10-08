@@ -38,6 +38,14 @@ pub enum Error {
 
     #[error("date {date} does not exist in time zone {tz}")]
     DateNotInTimeZone { date: chrono::NaiveDate, tz: String },
+
+    #[error("{0}")]
+    Pack(String),
+
+    #[error(
+        "this pack has format version {found}, but this build of allstops reads format version {supported}; rebuild it with `allstops pack`"
+    )]
+    PackVersion { found: u32, supported: u32 },
 }
 
 /// Which input limit a feed broke. See [`crate::Limits`].

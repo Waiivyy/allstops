@@ -12,6 +12,7 @@ pub mod inspect;
 pub mod limits;
 #[cfg(feature = "network")]
 pub mod network;
+pub mod pack;
 pub mod select;
 pub mod table;
 pub mod time;

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 
 use crate::archive::Archive;
 use crate::error::{Error, Result};
@@ -18,7 +19,7 @@ pub type RouteIdx = u32;
 pub type TripIdx = u32;
 pub type ServiceIdx = u32;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedInfo {
     pub publisher_name: String,
     pub publisher_url: String,
@@ -28,7 +29,7 @@ pub struct FeedInfo {
     pub version: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agency {
     pub id: String,
     pub name: String,
@@ -37,7 +38,7 @@ pub struct Agency {
 }
 
 /// `location_type` values from the reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LocationType {
     Platform,
     Station,
@@ -59,7 +60,7 @@ impl LocationType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stop {
     pub id: String,
     pub code: String,
@@ -71,7 +72,7 @@ pub struct Stop {
     pub platform_code: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     pub id: String,
     pub agency_id: String,
@@ -80,7 +81,7 @@ pub struct Route {
     pub route_type: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trip {
     pub id: String,
     pub route: RouteIdx,
@@ -103,7 +104,7 @@ pub struct Trip {
 
 /// pickup_type / drop_off_type: 0 regular, 1 none, 2 phone agency,
 /// 3 coordinate with driver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StopTime {
     pub trip: TripIdx,
     pub stop: StopIdx,
@@ -128,7 +129,7 @@ impl StopTime {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Calendar {
     pub service: ServiceIdx,
     /// Monday first.
@@ -137,20 +138,20 @@ pub struct Calendar {
     pub end: NaiveDate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Exception {
     Added,
     Removed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarDate {
     pub service: ServiceIdx,
     pub date: NaiveDate,
     pub exception: Exception,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frequency {
     pub trip: TripIdx,
     pub start: ServiceSeconds,
@@ -159,7 +160,7 @@ pub struct Frequency {
     pub exact_times: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// A transfers.txt row. A stop may name a station (`location_type = 1`), in
 /// which case the rule applies to all of its child stops. Route and trip
 /// fields narrow the rule; see the specificity ranking in the GTFS reference.
@@ -177,7 +178,7 @@ pub struct Transfer {
 }
 
 /// Problems that do not stop loading but that a user should see.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoadWarnings {
     pub stop_times_unknown_trip: u64,
     pub stop_times_unknown_stop: u64,
@@ -194,7 +195,10 @@ pub struct LoadWarnings {
     pub transfers_skipped: u64,
 }
 
-#[derive(Debug, Clone)]
+/// A loaded feed. Its serde form (used by network packs) leaves out the stop
+/// times, which packs encode separately, and the ID indexes, which are
+/// rebuilt from the tables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feed {
     /// Base names of every file in the archive.
     pub files: Vec<String>,
@@ -205,14 +209,18 @@ pub struct Feed {
     pub stops: Vec<Stop>,
     pub routes: Vec<Route>,
     pub trips: Vec<Trip>,
+    #[serde(skip)]
     pub stop_times: Vec<StopTime>,
     pub service_ids: Vec<String>,
     pub calendars: Vec<Calendar>,
     pub calendar_dates: Vec<CalendarDate>,
     pub frequencies: Vec<Frequency>,
     pub transfers: Vec<Transfer>,
+    #[serde(skip)]
     pub stop_index: HashMap<String, StopIdx>,
+    #[serde(skip)]
     pub trip_index: HashMap<String, TripIdx>,
+    #[serde(skip)]
     pub route_index: HashMap<String, RouteIdx>,
     pub warnings: LoadWarnings,
 }

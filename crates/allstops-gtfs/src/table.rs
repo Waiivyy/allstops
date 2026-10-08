@@ -88,6 +88,11 @@ impl<'r> Table<'r> {
         }
     }
 
+    /// The current row as read, untrimmed.
+    pub fn record(&self) -> &csv::ByteRecord {
+        &self.record
+    }
+
     /// 1-based physical line of the current row, for error messages.
     pub fn line(&self) -> u64 {
         self.record.position().map(|p| p.line()).unwrap_or(0)
