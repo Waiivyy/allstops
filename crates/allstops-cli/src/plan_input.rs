@@ -1,10 +1,12 @@
-//! Load everything a plan needs: feed, rules, selection, clustering and the
-//! routing network for the plan date.
+//! Load everything a plan or a check needs, from a GTFS zip with its rules
+//! files or from a network pack: feed, stations, targets, walks, rules and
+//! the routing network for the plan date.
 
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use allstops_core::itinerary::FeedRef;
 use allstops_core::network::Network;
 use allstops_core::rules::Rules;
 use allstops_gtfs::calendar::ServiceCalendar;
@@ -12,40 +14,64 @@ use allstops_gtfs::cluster::{
     ClusterConfig, Clustering, StationOverrides, apply_overrides, cluster,
 };
 use allstops_gtfs::network::{BuildReport, build_network};
+use allstops_gtfs::pack::{self, PackHeader};
 use allstops_gtfs::select::{Selection, select, visit_route_types};
 use allstops_gtfs::walks::WalkOverrides;
 use allstops_gtfs::{Feed, Limits};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::style;
 
 #[derive(clap::Args, Clone)]
 pub struct PlanArgs {
-    /// Path to a GTFS zip.
-    pub zip: PathBuf,
+    /// GTFS zip, or a network pack written by `allstops pack`.
+    #[arg(value_name = "ZIP_OR_PACK")]
+    pub input: PathBuf,
     /// Rules file (TOML). Its `selection`, `station_overrides` and `walks`
-    /// paths are relative to the rules file.
+    /// paths are relative to the rules file. Required with a zip; with a
+    /// pack it defaults to the rules the pack was built with, and must
+    /// match the pack's selection, overrides and connector modes.
     #[arg(long)]
-    pub rules: PathBuf,
+    pub rules: Option<PathBuf>,
     /// Override the plan date (YYYY-MM-DD).
     #[arg(long)]
     pub date: Option<String>,
 }
 
-pub struct PlanInput {
+/// The feed and what plans and checks derive from it.
+pub struct Basis {
     pub feed: Feed,
     pub clustering: Clustering,
-    pub rules: Rules,
-    pub selection: Selection,
+    /// Target stations, as indices into `clustering`.
+    pub targets: Vec<u32>,
+    /// Route types whose trips count as visits.
+    pub visit_types: Vec<RangeInclusive<u16>>,
     pub walks: WalkOverrides,
+    pub feed_ref: FeedRef,
+    pub timezone: String,
+    /// Decoding the zip or the pack, in milliseconds.
+    pub load_ms: f64,
+    /// The pack's header, when the input was a pack.
+    pub pack: Option<PackHeader>,
+}
+
+impl Basis {
+    pub fn target_ids(&self) -> Vec<String> {
+        self.targets
+            .iter()
+            .map(|&t| self.clustering.stations[t as usize].id.clone())
+            .collect()
+    }
+}
+
+pub struct PlanInput {
+    pub basis: Basis,
+    pub rules: Rules,
     pub network: Network,
     pub report: BuildReport,
-    pub load_ms: f64,
     pub build_ms: f64,
-    pub feed_sha256: String,
-    pub feed_ref: allstops_core::itinerary::FeedRef,
-    pub timezone: String,
 }
 
 /// A rules file and the files it names.
@@ -56,7 +82,7 @@ pub struct RuleFiles {
     pub walks: WalkOverrides,
 }
 
-fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T> {
+pub fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
@@ -143,39 +169,173 @@ pub fn feed_ref(bytes: &[u8], feed: &Feed) -> allstops_core::itinerary::FeedRef 
     }
 }
 
-pub fn load(args: &PlanArgs) -> Result<PlanInput> {
-    let RuleFiles {
-        rules,
-        selection,
-        stations: station_overrides,
-        walks,
-    } = load_rules(&args.rules, args.date.as_deref())?;
+/// SHA-256 of a value's canonical JSON (fields in declaration order).
+pub fn sha256_json<T: Serialize>(value: &T) -> Result<String> {
+    Ok(crate::cmd_fetch::sha256_hex(&serde_json::to_vec(value)?))
+}
+
+/// Hashes of the station overrides and walks, or `None` when they are empty,
+/// as recorded in and checked against a pack's header.
+pub fn override_hashes(files: &RuleFiles) -> Result<(Option<String>, Option<String>)> {
+    let stations = if files.stations == StationOverrides::default() {
+        None
+    } else {
+        Some(sha256_json(&files.stations)?)
+    };
+    let walks = if files.walks.walk.is_empty() {
+        None
+    } else {
+        Some(sha256_json(&files.walks)?)
+    };
+    Ok((stations, walks))
+}
+
+pub fn read_file(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// A GTFS zip, clustered with the station overrides, with the selection's
+/// targets.
+pub fn basis_from_zip(
+    bytes: &[u8],
+    selection: &Selection,
+    overrides: &StationOverrides,
+    walks: WalkOverrides,
+) -> Result<Basis> {
     let t0 = Instant::now();
-    let bytes =
-        std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
-    let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
+    let feed = Feed::from_zip_bytes(bytes, &Limits::default())?;
     let load_ms = t0.elapsed().as_secs_f64() * 1e3;
-    let feed_ref = feed_ref(&bytes, &feed);
-    let feed_sha256 = feed_ref.sha256.clone();
-    let timezone = feed.timezone()?.name().to_string();
+    let clustering = stations(&feed, overrides)?;
+    let targets = select(&feed, &clustering, selection)?;
+    Ok(Basis {
+        visit_types: visit_types(&feed, selection)?,
+        feed_ref: feed_ref(bytes, &feed),
+        timezone: feed.timezone()?.name().to_string(),
+        feed,
+        clustering,
+        targets,
+        walks,
+        load_ms,
+        pack: None,
+    })
+}
+
+/// A network pack. With rules files, they must describe the pack: the same
+/// selection, station overrides and walks, and no connector mode the pack
+/// does not hold.
+pub fn basis_from_pack(bytes: &[u8], files: Option<&RuleFiles>) -> Result<Basis> {
+    let t0 = Instant::now();
+    let p = pack::read(bytes, &Limits::default())?;
+    let load_ms = t0.elapsed().as_secs_f64() * 1e3;
+    if let Some(files) = files {
+        check_matches_pack(files, &p.header)?;
+    }
+    let h = &p.header;
+    Ok(Basis {
+        feed_ref: FeedRef {
+            id: h.feed_id.clone(),
+            sha256: h.feed_sha256.clone(),
+            feed_version: h.feed_version.clone(),
+            attribution: h.attribution.clone(),
+        },
+        timezone: p.feed.timezone()?.name().to_string(),
+        visit_types: p.visit_types.iter().map(|&t| t..=t).collect(),
+        feed: p.feed,
+        clustering: p.clustering,
+        targets: p.targets,
+        walks: p.walks,
+        load_ms,
+        pack: Some(p.header),
+    })
+}
+
+fn check_matches_pack(files: &RuleFiles, h: &PackHeader) -> Result<()> {
+    let rebuild = "rebuild the pack with `allstops pack`, or leave out --rules";
+    if sha256_json(&files.selection)? != h.selection_sha256 {
+        bail!(
+            "the pack was built for another selection ({:?}); {rebuild}",
+            h.selection_name
+        );
+    }
+    let (stations, walks) = override_hashes(files)?;
+    if stations != h.station_overrides_sha256 {
+        bail!("the pack was built with other station overrides; {rebuild}");
+    }
+    if walks != h.walks_sha256 {
+        bail!("the pack was built with another walks file; {rebuild}");
+    }
+    if let Some(m) = files
+        .rules
+        .connector_modes
+        .iter()
+        .find(|m| !h.connector_modes.contains(m))
+    {
+        bail!(
+            "the pack holds no {m} trips (its connector modes are {}); {rebuild}",
+            h.connector_modes.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The rules a pack was built with.
+pub fn pack_rules(h: &PackHeader, date: Option<&str>) -> Result<Rules> {
+    let mut rules: Rules =
+        toml::from_str(&h.rules_toml).context("reading the rules stored in the pack")?;
+    if let Some(d) = date {
+        rules.date = d.to_string();
+    }
+    rules
+        .validate()
+        .map_err(|m| anyhow::anyhow!("invalid rules in the pack:\n{m}"))?;
+    Ok(rules)
+}
+
+/// A zip with its rules files, or a pack with optional rules.
+pub fn load_basis(
+    input: &Path,
+    rules: Option<&Path>,
+    date: Option<&str>,
+) -> Result<(Basis, Rules)> {
+    let bytes = read_file(input)?;
+    if pack::is_pack(&bytes) {
+        let files = rules.map(|p| load_rules(p, date)).transpose()?;
+        let basis = basis_from_pack(&bytes, files.as_ref())?;
+        let rules = match files {
+            Some(f) => f.rules,
+            None => pack_rules(basis.pack.as_ref().expect("read from a pack"), date)?,
+        };
+        Ok((basis, rules))
+    } else {
+        let Some(path) = rules else {
+            bail!("--rules is required with a GTFS zip");
+        };
+        let files = load_rules(path, date)?;
+        let basis = basis_from_zip(&bytes, &files.selection, &files.stations, files.walks)?;
+        Ok((basis, files.rules))
+    }
+}
+
+pub fn load(args: &PlanArgs) -> Result<PlanInput> {
+    let (basis, rules) = load_basis(&args.input, args.rules.as_deref(), args.date.as_deref())?;
     let t1 = Instant::now();
-    let clustering = stations(&feed, &station_overrides)?;
-    let targets = select(&feed, &clustering, &selection)?;
-    let cal = ServiceCalendar::new(&feed);
+    let cal = ServiceCalendar::new(&basis.feed);
     let (network, report) = build_network(
-        &feed,
+        &basis.feed,
         &cal,
-        &clustering,
-        &targets,
-        &visit_types(&feed, &selection)?,
+        &basis.clustering,
+        &basis.targets,
+        &basis.visit_types,
         &rules,
-        &walks,
+        &basis.walks,
     )?;
     let build_ms = t1.elapsed().as_secs_f64() * 1e3;
     eprintln!(
         "{}",
         style::dim(&format!(
-            "feed loaded in {load_ms:.0} ms; network for {} built in {build_ms:.0} ms: {} trips, {} connections, {} stations, {} walk links, {} targets",
+            "{} loaded in {:.0} ms; network for {} built in {build_ms:.0} ms: {} trips, {} connections, {} stations, {} walk links, {} targets",
+            if basis.pack.is_some() { "pack" } else { "feed" },
+            basis.load_ms,
             report.date,
             report.trips,
             report.connections,
@@ -184,7 +344,7 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
             report.targets
         ))
     );
-    if !walks.walk.is_empty() {
+    if !basis.walks.walk.is_empty() {
         eprintln!(
             "{}",
             style::dim(&format!(
@@ -194,17 +354,10 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
         );
     }
     Ok(PlanInput {
-        feed,
-        clustering,
+        basis,
         rules,
-        selection,
-        walks,
         network,
         report,
-        load_ms,
         build_ms,
-        feed_sha256,
-        feed_ref,
-        timezone,
     })
 }

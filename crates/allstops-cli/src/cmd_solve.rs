@@ -123,23 +123,15 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         net,
         &best.plan,
         &input.rules,
-        input.feed_ref.clone(),
-        &input.timezone,
+        input.basis.feed_ref.clone(),
+        &input.basis.timezone,
     ) else {
         bail!("internal error: the best plan does not visit every target");
     };
     itinerary.lower_bound_s = lb;
     itinerary.gap = gap.map(|g| (g * 1e4).round() / 1e4);
     let doc = serde_json::to_string_pretty(&itinerary)?;
-    let report = check_json(
-        &input.feed,
-        &input.clustering,
-        &input.selection,
-        &input.walks,
-        Some(&rules_for_verifier(&input.rules)?),
-        Some(&input.feed_sha256),
-        &doc,
-    )?;
+    let report = check_json(&input.basis, Some(&rules_for_verifier(&input.rules)?), &doc)?;
     if !report.passed {
         eprintln!(
             "{} the verifier rejected the planned route ({} violations). This is a bug; nothing is shown.",
@@ -223,7 +215,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
                 "attribution": itinerary.feed.attribution,
                 "note": SAFETY_NOTE,
                 "build_ms": input.build_ms.round(),
-                "load_ms": input.load_ms.round(),
+                "load_ms": input.basis.load_ms.round(),
             }))?
         );
     } else {
@@ -273,7 +265,12 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
             show(&profile_bound)
         );
         println!("  greedy runs      {runs} ({feasible} covered every target) in {solve_ms:.0} ms");
-        println!("  {}", style::good("verified against the raw timetable"));
+        let against = if input.basis.pack.is_some() {
+            "verified against the pack's timetable"
+        } else {
+            "verified against the raw timetable"
+        };
+        println!("  {}", style::good(against));
         println!(
             "{}",
             style::dim("Times are service-day clock times (may exceed 24:00).")

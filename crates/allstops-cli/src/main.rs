@@ -1,6 +1,7 @@
 mod check;
 mod cmd_fetch;
 mod cmd_inspect;
+mod cmd_pack;
 mod cmd_solve;
 mod cmd_stations;
 mod cmd_verify;
@@ -30,10 +31,12 @@ struct Cli {
 enum Command {
     /// Download a registered feed over HTTPS and check it against its pinned hash.
     Fetch(cmd_fetch::Args),
-    /// Print a profile of a GTFS zip: validity, structure and warnings.
+    /// Print a profile of a GTFS zip, or the header of a network pack.
     Inspect(cmd_inspect::Args),
     /// Cluster stops into stations and optionally list a selection's targets.
     Stations(cmd_stations::Args),
+    /// Write a network pack: the part of a feed that plans for one selection use.
+    Pack(cmd_pack::Args),
     /// Plan a route that visits every target station.
     Solve(cmd_solve::Args),
     /// Check an itinerary against the raw feed with the independent verifier.
@@ -68,6 +71,7 @@ fn main() -> ExitCode {
         Command::Fetch(a) => cmd_fetch::run(a, cli.json),
         Command::Inspect(a) => cmd_inspect::run(a, cli.json),
         Command::Stations(a) => cmd_stations::run(a, cli.json),
+        Command::Pack(a) => cmd_pack::run(a, cli.json),
         Command::Solve(a) => cmd_solve::run(a, cli.json),
         Command::Verify(a) => cmd_verify::run(a, cli.json),
     };

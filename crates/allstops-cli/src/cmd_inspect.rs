@@ -10,7 +10,8 @@ use crate::{Outcome, style};
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Path to a GTFS zip.
+    /// Path to a GTFS zip or a network pack.
+    #[arg(value_name = "ZIP_OR_PACK")]
     zip: PathBuf,
     /// Also check that this plan date (YYYY-MM-DD) is inside the validity range.
     #[arg(long)]
@@ -23,6 +24,9 @@ const LOOKAHEAD_DAYS: i64 = 28;
 pub fn run(args: Args, json: bool) -> Result<Outcome> {
     let bytes =
         std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
+    if allstops_gtfs::pack::is_pack(&bytes) {
+        return inspect_pack(&bytes, json);
+    }
     let t0 = Instant::now();
     let feed = Feed::from_zip_bytes(&bytes, &Limits::default())
         .with_context(|| format!("loading {}", args.zip.display()))?;
@@ -173,4 +177,63 @@ fn print_human(p: &Profile) {
         };
         println!("  {label:<32} {v}");
     }
+}
+
+/// Print a pack's header after checking the whole pack.
+fn inspect_pack(bytes: &[u8], json: bool) -> Result<Outcome> {
+    let t0 = Instant::now();
+    let p = allstops_gtfs::pack::read(bytes, &Limits::default())?;
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let h = &p.header;
+    if json {
+        let mut v = serde_json::to_value(h)?;
+        v["format_version"] = serde_json::json!(allstops_gtfs::pack::FORMAT_VERSION);
+        v["bytes"] = serde_json::json!(bytes.len());
+        v["load_ms"] = serde_json::json!(load_ms.round());
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(Outcome::Ok);
+    }
+    let none = || "none".to_string();
+    println!("{}", style::bold("Network pack"));
+    let row = |k: &str, v: String| println!("  {k:<22} {v}");
+    row(
+        "format version",
+        allstops_gtfs::pack::FORMAT_VERSION.to_string(),
+    );
+    row(
+        "size",
+        format!("{} bytes, checked in {load_ms:.0} ms", bytes.len()),
+    );
+    row("written by", h.generator.clone());
+    row("feed", format!("{} ({})", h.feed_id, h.feed_version));
+    row("feed sha256", h.feed_sha256.clone());
+    row("time zone", h.timezone.clone());
+    row(
+        "validity",
+        h.validity
+            .as_ref()
+            .map(|(a, b)| format!("{a} to {b}"))
+            .unwrap_or_else(none),
+    );
+    row(
+        "selection",
+        format!("{} ({})", h.selection_name, h.selection_sha256),
+    );
+    row("rules sha256", h.rules_sha256.clone());
+    row(
+        "station overrides",
+        h.station_overrides_sha256.clone().unwrap_or_else(none),
+    );
+    row("walks", h.walks_sha256.clone().unwrap_or_else(none));
+    row("connector modes", h.connector_modes.join(", "));
+    let c = &h.counts;
+    row(
+        "holds",
+        format!(
+            "{} stations ({} targets), {} stops, {} routes, {} trips, {} stop times",
+            c.stations, c.targets, c.stops, c.routes, c.trips, c.stop_times
+        ),
+    );
+    println!("{}", h.attribution);
+    Ok(Outcome::Ok)
 }

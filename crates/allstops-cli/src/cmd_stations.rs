@@ -26,6 +26,9 @@ pub struct Args {
 pub fn run(args: Args, json: bool) -> Result<Outcome> {
     let bytes =
         std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
+    if allstops_gtfs::pack::is_pack(&bytes) {
+        anyhow::bail!("stations needs a GTFS zip; `allstops inspect` shows what a pack holds");
+    }
     let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
     let attribution = crate::plan_input::feed_ref(&bytes, &feed).attribution;
     let overrides: StationOverrides = match &args.overrides {
