@@ -161,6 +161,9 @@ pub fn select(
         let mut matched: BTreeSet<u32> = BTreeSet::new();
         if rule.has_trip_filter() {
             for (ti, trip) in feed.trips.iter().enumerate() {
+                if trip.frequency_template {
+                    continue;
+                }
                 if !rule.matches_route(&feed.routes[trip.route as usize]) {
                     continue;
                 }

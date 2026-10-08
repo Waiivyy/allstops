@@ -44,6 +44,9 @@ pub struct Profile {
     pub trips_past_midnight: usize,
     pub latest_time: String,
     pub frequencies_rows: usize,
+    /// Trips with frequencies.txt rows, and the runs expanded from them.
+    pub frequency_templates: usize,
+    pub frequency_runs: usize,
     pub frequencies_exact_times: usize,
     pub transfers_rows: usize,
     pub pickup_drop_off: BTreeMap<String, usize>,
@@ -298,6 +301,8 @@ pub fn profile(feed: &Feed) -> Profile {
         trips_past_midnight: past_midnight,
         latest_time: format_time(latest),
         frequencies_rows: feed.frequencies.len(),
+        frequency_templates: feed.trips.iter().filter(|t| t.frequency_template).count(),
+        frequency_runs: feed.trips.iter().filter(|t| t.frequency.is_some()).count(),
         frequencies_exact_times: feed.frequencies.iter().filter(|f| f.exact_times).count(),
         transfers_rows: feed.transfers.len(),
         pickup_drop_off,

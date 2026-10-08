@@ -92,6 +92,13 @@ pub struct Trip {
     pub shape_id: String,
     /// Range into [`Feed::stop_times`], ordered by stop_sequence.
     pub stop_times: Range<u32>,
+    /// Set for a run expanded from frequencies.txt: `Some(true)` when the
+    /// service is schedule-based (`exact_times = 1`), `Some(false)` when it
+    /// only keeps headways, so the departure times are approximate.
+    pub frequency: Option<bool>,
+    /// A trip with frequencies.txt rows. Its stop times are only the travel
+    /// time pattern for its expanded runs; the template itself never runs.
+    pub frequency_template: bool,
 }
 
 /// pickup_type / drop_off_type: 0 regular, 1 none, 2 phone agency,
@@ -293,6 +300,7 @@ impl Feed {
         ar.with_reader("frequencies.txt", |r| {
             load_frequencies(&mut Table::new("frequencies.txt", r, max_rows)?, &mut feed)
         })?;
+        expand_frequencies(&mut feed, max_rows)?;
         ar.with_reader("transfers.txt", |r| {
             load_transfers(&mut Table::new("transfers.txt", r, max_rows)?, &mut feed)
         })?;
@@ -526,6 +534,8 @@ fn load_trips(
             block_id: t.get(block)?.to_string(),
             shape_id: t.get(shape)?.to_string(),
             stop_times: 0..0,
+            frequency: None,
+            frequency_template: false,
         });
     }
     Ok(())
@@ -775,13 +785,103 @@ fn load_frequencies(t: &mut Table, feed: &mut Feed) -> Result<()> {
         if h <= 0 {
             return Err(t.error("headway_secs must be positive"));
         }
+        let (s, e) = (time(start)?, time(end)?);
+        if e <= s {
+            return Err(t.error("end_time must be after start_time"));
+        }
+        let exact_times = match t.get(exact)? {
+            "" | "0" => false,
+            "1" => true,
+            other => return Err(t.error(format!("bad exact_times {other:?}"))),
+        };
         feed.frequencies.push(Frequency {
             trip: ti,
-            start: time(start)?,
-            end: time(end)?,
+            start: s,
+            end: e,
             headway: h,
-            exact_times: t.get(exact)? == "1",
+            exact_times,
         });
+    }
+    Ok(())
+}
+
+/// Turn every trip with frequencies.txt rows into concrete runs: one per
+/// departure `start_time + k * headway_secs` before `end_time`, shifted from
+/// the template's first departure, named `<trip>@<HH:MM:SS>`. The template is
+/// kept, flagged, and never run. The expanded stop times count against the
+/// row limit like any other.
+fn expand_frequencies(feed: &mut Feed, max_rows: u64) -> Result<()> {
+    if feed.frequencies.is_empty() {
+        return Ok(());
+    }
+    let mut by_trip: std::collections::BTreeMap<TripIdx, Vec<Frequency>> =
+        std::collections::BTreeMap::new();
+    for f in &feed.frequencies {
+        by_trip.entry(f.trip).or_default().push(f.clone());
+    }
+    let file_err = |message: String| Error::File {
+        file: "frequencies.txt".into(),
+        message,
+    };
+    let mut rows = feed.stop_times.len() as u64;
+    for (trip, mut freqs) in by_trip {
+        freqs.sort_by_key(|f| f.start);
+        if let Some(w) = freqs.windows(2).find(|w| w[1].start < w[0].end) {
+            return Err(file_err(format!(
+                "headways for trip {:?} overlap at {}",
+                feed.trips[trip as usize].id,
+                crate::time::format_time(w[1].start)
+            )));
+        }
+        let pattern: Vec<StopTime> = feed.trip_stop_times(trip).to_vec();
+        let Some(first) = pattern.first() else {
+            continue;
+        };
+        let base = first.departure;
+        feed.trips[trip as usize].frequency_template = true;
+        for f in freqs {
+            let mut start = f.start;
+            while start < f.end {
+                rows += pattern.len() as u64;
+                if rows > max_rows {
+                    return Err(Error::Limit(crate::error::LimitKind::RowCount {
+                        file: "frequencies.txt (expanded stop times)".into(),
+                        limit: max_rows,
+                    }));
+                }
+                let shift = start - base;
+                let new_trip = feed.trips.len() as TripIdx;
+                let from = feed.stop_times.len() as u32;
+                for (k, st) in pattern.iter().enumerate() {
+                    let mut arrival = st.arrival + shift;
+                    let departure = st.departure + shift;
+                    // A first-stop arrival before the service day starts
+                    // has no meaning; use the departure.
+                    if k == 0 && arrival < 0 {
+                        arrival = departure;
+                    }
+                    feed.stop_times.push(StopTime {
+                        trip: new_trip,
+                        arrival,
+                        departure,
+                        ..*st
+                    });
+                }
+                let mut run = feed.trips[trip as usize].clone();
+                run.id = format!("{}@{}", run.id, crate::time::format_time(start));
+                run.frequency = Some(f.exact_times);
+                run.frequency_template = false;
+                run.stop_times = from..feed.stop_times.len() as u32;
+                if feed.trip_index.insert(run.id.clone(), new_trip).is_some() {
+                    return Err(file_err(format!(
+                        "expanded trip ID {:?} clashes with an existing trip",
+                        run.id
+                    )));
+                }
+                feed.trips.push(run);
+                start += f.headway;
+            }
+        }
     }
     Ok(())
 }

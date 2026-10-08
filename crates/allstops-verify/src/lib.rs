@@ -439,6 +439,17 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                     continue;
                 };
                 let trip = &feed.trips[ti as usize];
+                if trip.frequency_template {
+                    push(
+                        "TRIP_NOT_RUN",
+                        li_,
+                        format!(
+                            "{trip_id} only describes the pattern of its frequencies.txt runs ({trip_id}@HH:MM:SS)"
+                        ),
+                    );
+                    place = None;
+                    continue;
+                }
                 let route_type = feed.routes[trip.route as usize].route_type;
                 let Ok(sd) = NaiveDate::parse_from_str(service_date, "%Y-%m-%d") else {
                     push(

@@ -176,6 +176,9 @@ pub fn build_network(
         };
         let day_str = day.format("%Y-%m-%d").to_string();
         for (ti, trip) in feed.trips.iter().enumerate() {
+            if trip.frequency_template {
+                continue;
+            }
             let route = &feed.routes[trip.route as usize];
             let visits = in_ranges(route.route_type, visit_types);
             if !visits && !in_ranges(route.route_type, &connector) {
@@ -608,6 +611,16 @@ mod tests {
             ..rules("2026-11-12")
         };
         assert!(build(&[], r).is_ok());
+    }
+
+    #[test]
+    fn frequency_runs_are_routed_and_templates_are_not() {
+        let freq =
+            "trip_id,start_time,end_time,headway_secs,exact_times\nT1,06:00:00,07:00:00,1200,1\n";
+        let (net, rep) = build(&[("frequencies.txt", freq)], rules("2026-11-12")).unwrap();
+        assert_eq!(rep.trips, 3, "three runs, not the template");
+        let ids: Vec<&str> = net.trips.iter().map(|t| t.gtfs_id.as_str()).collect();
+        assert_eq!(ids, vec!["T1@06:00:00", "T1@06:20:00", "T1@06:40:00"]);
     }
 
     #[test]
