@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::feed::{Feed, LocationType, StopIdx};
 
@@ -45,6 +45,8 @@ pub enum MergeReason {
     ParentStation,
     DhidPrefix,
     NameDistance,
+    /// Placed by stations.overrides.toml.
+    Override,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -325,6 +327,225 @@ pub fn cluster(feed: &Feed, cfg: &ClusterConfig) -> Clustering {
         stations,
         station_of_stop,
     }
+}
+
+/// `stations.overrides.toml`: corrections applied after automatic
+/// clustering, in a fixed order: every split, then every merge, then every
+/// rename, each in file order. Later steps may use IDs created by earlier
+/// ones.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StationOverrides {
+    #[serde(default)]
+    pub split: Vec<SplitOverride>,
+    #[serde(default)]
+    pub merge: Vec<MergeOverride>,
+    #[serde(default)]
+    pub rename: Vec<RenameOverride>,
+}
+
+/// Move stops out of a station into a new station.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitOverride {
+    pub station: String,
+    pub stops: Vec<String>,
+    /// ID of the new station; must not exist yet.
+    pub id: String,
+    /// Name of the new station; defaults to the first moved stop's name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Why, for the record.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// Join stations into one. The first keeps its place and, unless `id` is
+/// given, its ID.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeOverride {
+    pub stations: Vec<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameOverride {
+    pub station: String,
+    pub name: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum OverrideError {
+    #[error("station overrides: unknown station {0:?}")]
+    UnknownStation(String),
+    #[error("station overrides: stop {stop:?} is not in station {station:?}")]
+    StopNotInStation { stop: String, station: String },
+    #[error("station overrides: a merge needs at least two different stations")]
+    MergeTooFew,
+    #[error("station overrides: station ID {0:?} is already taken")]
+    IdTaken(String),
+    #[error("station overrides: the split would leave station {0:?} empty")]
+    WouldEmpty(String),
+}
+
+/// Apply overrides to a clustering, with the default configuration for the
+/// recomputed ambiguity report.
+pub fn apply_overrides(
+    feed: &Feed,
+    clustering: Clustering,
+    ov: &StationOverrides,
+) -> Result<Clustering, OverrideError> {
+    apply_overrides_with(feed, clustering, ov, &ClusterConfig::default())
+}
+
+pub fn apply_overrides_with(
+    feed: &Feed,
+    clustering: Clustering,
+    ov: &StationOverrides,
+    cfg: &ClusterConfig,
+) -> Result<Clustering, OverrideError> {
+    // Working list: every station with a sort key that keeps the original
+    // order and puts a split-off station right after its source.
+    let mut slots: Vec<Option<((usize, usize), Station)>> = clustering
+        .stations
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| Some(((i, 0), s)))
+        .collect();
+    let mut index: HashMap<String, usize> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.as_ref().map(|(_, st)| (st.id.clone(), i)))
+        .collect();
+    let mut children: HashMap<usize, usize> = HashMap::new();
+
+    for sp in &ov.split {
+        let src = *index
+            .get(&sp.station)
+            .ok_or_else(|| OverrideError::UnknownStation(sp.station.clone()))?;
+        if index.contains_key(&sp.id) {
+            return Err(OverrideError::IdTaken(sp.id.clone()));
+        }
+        let ((orig, _), source) = slots[src].as_mut().expect("indexed slots are live");
+        let mut moved = Vec::new();
+        for stop in &sp.stops {
+            let pos = source
+                .members
+                .iter()
+                .position(|m| &m.stop_id == stop)
+                .ok_or_else(|| OverrideError::StopNotInStation {
+                    stop: stop.clone(),
+                    station: sp.station.clone(),
+                })?;
+            let mut m = source.members.remove(pos);
+            m.reason = MergeReason::Override;
+            moved.push(m);
+        }
+        if source.members.is_empty() {
+            return Err(OverrideError::WouldEmpty(sp.station.clone()));
+        }
+        let pts: Vec<&crate::feed::Stop> = moved
+            .iter()
+            .map(|m| &feed.stops[m.stop as usize])
+            .filter(|s| s.lat.is_finite() && s.lon.is_finite())
+            .collect();
+        let (lat, lon) = if pts.is_empty() {
+            (f64::NAN, f64::NAN)
+        } else {
+            let k = pts.len() as f64;
+            (
+                pts.iter().map(|s| s.lat).sum::<f64>() / k,
+                pts.iter().map(|s| s.lon).sum::<f64>() / k,
+            )
+        };
+        let orig = *orig;
+        let seq = children.entry(orig).or_insert(0);
+        *seq += 1;
+        let station = Station {
+            id: sp.id.clone(),
+            name: sp.name.clone().unwrap_or_else(|| moved[0].name.clone()),
+            lat,
+            lon,
+            members: moved,
+        };
+        index.insert(sp.id.clone(), slots.len());
+        slots.push(Some(((orig, *seq), station)));
+    }
+
+    for mg in &ov.merge {
+        let mut ids: Vec<usize> = Vec::new();
+        for id in &mg.stations {
+            let i = *index
+                .get(id)
+                .ok_or_else(|| OverrideError::UnknownStation(id.clone()))?;
+            if !ids.contains(&i) {
+                ids.push(i);
+            }
+        }
+        if ids.len() < 2 {
+            return Err(OverrideError::MergeTooFew);
+        }
+        if let Some(new_id) = &mg.id
+            && let Some(&other) = index.get(new_id)
+            && !ids.contains(&other)
+        {
+            return Err(OverrideError::IdTaken(new_id.clone()));
+        }
+        let first = ids[0];
+        let mut absorbed = Vec::new();
+        for &i in &ids[1..] {
+            let (_, st) = slots[i].take().expect("indexed slots are live");
+            index.remove(&st.id);
+            absorbed.extend(st.members.into_iter().map(|mut m| {
+                m.reason = MergeReason::Override;
+                m
+            }));
+        }
+        let (_, target) = slots[first].as_mut().expect("indexed slots are live");
+        target.members.extend(absorbed);
+        if let Some(name) = &mg.name {
+            target.name = name.clone();
+        }
+        if let Some(new_id) = &mg.id {
+            index.remove(&target.id);
+            target.id = new_id.clone();
+            index.insert(new_id.clone(), first);
+        }
+    }
+
+    for rn in &ov.rename {
+        let i = *index
+            .get(&rn.station)
+            .ok_or_else(|| OverrideError::UnknownStation(rn.station.clone()))?;
+        slots[i].as_mut().expect("indexed slots are live").1.name = rn.name.clone();
+    }
+
+    let mut live: Vec<((usize, usize), Station)> = slots.into_iter().flatten().collect();
+    live.sort_by_key(|(k, _)| *k);
+    let stations: Vec<Station> = live.into_iter().map(|(_, s)| s).collect();
+    let mut station_of_stop = clustering.station_of_stop;
+    for (i, st) in stations.iter().enumerate() {
+        for m in &st.members {
+            station_of_stop[m.stop as usize] = i as u32;
+        }
+    }
+    let (ambiguities, ambiguity_counts, scan_complete) = ambiguities(&stations, cfg);
+    Ok(Clustering {
+        ambiguities,
+        ambiguity_counts,
+        complete: clustering.complete && scan_complete,
+        stations,
+        station_of_stop,
+    })
 }
 
 /// Ambiguous pairs: samples, counts by kind, and whether the scans finished.
