@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use allstops_core::itinerary::FeedRef;
 use allstops_core::network::Network;
-use allstops_core::rules::Rules;
+use allstops_core::rules::{Rules, route_types_for_mode};
 use allstops_gtfs::calendar::ServiceCalendar;
 use allstops_gtfs::cluster::{
     ClusterConfig, Clustering, StationOverrides, apply_overrides, cluster,
@@ -136,16 +136,17 @@ pub fn visit_types(feed: &Feed, sel: &Selection) -> Result<Vec<RangeInclusive<u1
 
 /// Identity and attribution of a feed file: from the registry when this
 /// exact file is pinned there, otherwise crediting the publisher named in
-/// the feed.
-pub fn feed_ref(bytes: &[u8], feed: &Feed) -> allstops_core::itinerary::FeedRef {
+/// the feed. `path` is where the file was read from; the registry is looked
+/// up from there (see `registry::find_registry`).
+pub fn feed_ref(bytes: &[u8], feed: &Feed, path: &Path) -> allstops_core::itinerary::FeedRef {
     let sha256 = crate::cmd_fetch::sha256_hex(bytes);
     let feed_version = feed
         .feed_info
         .as_ref()
         .map(|f| f.version.clone())
         .unwrap_or_default();
-    let registered = crate::registry::Registry::load(&crate::default_registry())
-        .ok()
+    let registered = crate::registry::find_registry(path)
+        .and_then(|r| crate::registry::Registry::load(&r).ok())
         .and_then(|r| r.feeds.into_iter().find(|f| f.sha256 == sha256));
     match registered {
         Some(e) => allstops_core::itinerary::FeedRef {
@@ -197,6 +198,7 @@ pub fn read_file(path: &Path) -> Result<Vec<u8>> {
 /// A GTFS zip, clustered with the station overrides, with the selection's
 /// targets.
 pub fn basis_from_zip(
+    path: &Path,
     bytes: &[u8],
     selection: &Selection,
     overrides: &StationOverrides,
@@ -210,7 +212,7 @@ pub fn basis_from_zip(
     let targets = select(&feed, &clustering, selection)?;
     Ok(Basis {
         visit_types: visit_types(&feed, selection)?,
-        feed_ref: feed_ref(bytes, &feed),
+        feed_ref: feed_ref(bytes, &feed, path),
         timezone: feed.timezone()?.name().to_string(),
         feed,
         clustering,
@@ -265,18 +267,34 @@ fn check_matches_pack(files: &RuleFiles, h: &PackHeader) -> Result<()> {
     if walks != h.walks_sha256 {
         bail!("the pack was built with another walks file; {rebuild}");
     }
-    if let Some(m) = files
-        .rules
-        .connector_modes
-        .iter()
-        .find(|m| !h.connector_modes.contains(m))
-    {
+    if let Some(m) = uncovered_mode(&files.rules.connector_modes, &h.connector_modes) {
         bail!(
             "the pack holds no {m} trips (its connector modes are {}); {rebuild}",
             h.connector_modes.join(", ")
         );
     }
     Ok(())
+}
+
+/// The first of `modes` with a route type that none of `available` covers.
+/// Modes are compared by the route types they stand for, so aliases such
+/// as `metro` and `subway` match; an unknown mode is never covered.
+pub fn uncovered_mode<'a>(modes: &'a [String], available: &[String]) -> Option<&'a str> {
+    let have: Vec<RangeInclusive<u16>> = available
+        .iter()
+        .filter_map(|m| route_types_for_mode(m))
+        .flatten()
+        .collect();
+    modes
+        .iter()
+        .find(|m| match route_types_for_mode(m) {
+            Some(want) => !want
+                .into_iter()
+                .flatten()
+                .all(|t| have.iter().any(|r| r.contains(&t))),
+            None => true,
+        })
+        .map(String::as_str)
 }
 
 /// The rules a pack was built with.
@@ -312,7 +330,13 @@ pub fn load_basis(
             bail!("--rules is required with a GTFS zip");
         };
         let files = load_rules(path, date)?;
-        let basis = basis_from_zip(&bytes, &files.selection, &files.stations, files.walks)?;
+        let basis = basis_from_zip(
+            input,
+            &bytes,
+            &files.selection,
+            &files.stations,
+            files.walks,
+        )?;
         Ok((basis, files.rules))
     }
 }
@@ -361,4 +385,28 @@ pub fn load(args: &PlanArgs) -> Result<PlanInput> {
         report,
         build_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uncovered_mode;
+
+    fn modes(m: &[&str]) -> Vec<String> {
+        m.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn connector_modes_are_compared_by_route_type() {
+        let pack = modes(&["tram", "bus", "subway"]);
+        assert_eq!(uncovered_mode(&modes(&["bus", "metro"]), &pack), None);
+        assert_eq!(
+            uncovered_mode(&modes(&["tram", "rail"]), &pack),
+            Some("rail")
+        );
+        assert_eq!(
+            uncovered_mode(&modes(&["hovercraft"]), &pack),
+            Some("hovercraft")
+        );
+        assert_eq!(uncovered_mode(&[], &[]), None);
+    }
 }

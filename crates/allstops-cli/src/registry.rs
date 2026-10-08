@@ -26,6 +26,26 @@ pub struct FeedEntry {
     pub redistribution: String,
 }
 
+/// The registry that applies to a feed file: `data/feeds.toml` in the
+/// nearest ancestor of the file that has one, or else of the current
+/// directory. Packs record the registry's attribution, so the answer must
+/// not depend on where the command runs.
+pub fn find_registry(near: &Path) -> Option<PathBuf> {
+    let roots = [
+        std::fs::canonicalize(near).ok(),
+        std::env::current_dir().ok(),
+    ];
+    for root in roots.into_iter().flatten() {
+        for dir in root.ancestors() {
+            let candidate = dir.join("data").join("feeds.toml");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 impl FeedEntry {
     pub fn render_attribution(&self, feed_version: &str) -> String {
         let version = if feed_version.is_empty() {
@@ -97,5 +117,24 @@ impl Registry {
         entry["retrieved"] = toml_edit::value(retrieved);
         std::fs::write(&self.path, doc.to_string())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::find_registry;
+
+    #[test]
+    fn the_registry_is_found_from_the_feed_file() {
+        let root = std::env::temp_dir().join(format!("allstops-registry-{}", std::process::id()));
+        let cache = root.join("data").join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(root.join("data").join("feeds.toml"), "").unwrap();
+        std::fs::write(cache.join("feed.zip"), "").unwrap();
+        let found =
+            find_registry(&cache.join("feed.zip")).map(|p| std::fs::canonicalize(p).unwrap());
+        let want = std::fs::canonicalize(root.join("data").join("feeds.toml")).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found, Some(want));
     }
 }

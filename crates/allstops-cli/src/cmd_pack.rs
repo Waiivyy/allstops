@@ -49,7 +49,21 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
             args.zip.display()
         );
     }
-    let basis = basis_from_zip(&zip, &files.selection, &files.stations, files.walks.clone())?;
+    let basis = basis_from_zip(
+        &args.zip,
+        &zip,
+        &files.selection,
+        &files.stations,
+        files.walks.clone(),
+    )?;
+    if basis.feed_ref.id == "unregistered" {
+        eprintln!(
+            "{}",
+            style::dim(
+                "this feed is not pinned in a data/feeds.toml next to it or the current directory; the attribution comes from feed_info.txt"
+            )
+        );
+    }
     let feed = &basis.feed;
     let mut connector_types = Vec::new();
     for m in &files.rules.connector_modes {

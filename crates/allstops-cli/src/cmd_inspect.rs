@@ -25,7 +25,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
     let bytes =
         std::fs::read(&args.zip).with_context(|| format!("reading {}", args.zip.display()))?;
     if allstops_gtfs::pack::is_pack(&bytes) {
-        return inspect_pack(&bytes, json);
+        return inspect_pack(&bytes, json, args.date);
     }
     let t0 = Instant::now();
     let feed = Feed::from_zip_bytes(&bytes, &Limits::default())
@@ -180,16 +180,25 @@ fn print_human(p: &Profile) {
 }
 
 /// Print a pack's header after checking the whole pack.
-fn inspect_pack(bytes: &[u8], json: bool) -> Result<Outcome> {
+fn inspect_pack(bytes: &[u8], json: bool, date: Option<NaiveDate>) -> Result<Outcome> {
     let t0 = Instant::now();
     let p = allstops_gtfs::pack::read(bytes, &Limits::default())?;
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let h = &p.header;
+    // The range plans from this pack accept, from its own calendars.
+    let validity = allstops_gtfs::calendar::validity(
+        &p.feed,
+        &allstops_gtfs::calendar::ServiceCalendar::new(&p.feed),
+    );
+    let covers = |d: NaiveDate| validity.is_some_and(|(s, e)| d >= s && d <= e);
     if json {
         let mut v = serde_json::to_value(h)?;
         v["format_version"] = serde_json::json!(allstops_gtfs::pack::FORMAT_VERSION);
         v["bytes"] = serde_json::json!(bytes.len());
         v["load_ms"] = serde_json::json!(load_ms.round());
+        if let Some(d) = date {
+            v["covers_plan_date"] = serde_json::json!({ "date": d, "covered": covers(d) });
+        }
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(Outcome::Ok);
     }
@@ -234,6 +243,14 @@ fn inspect_pack(bytes: &[u8], json: bool) -> Result<Outcome> {
             c.stations, c.targets, c.stops, c.routes, c.trips, c.stop_times
         ),
     );
+    if let Some(d) = date {
+        let mark = if covers(d) {
+            style::good("yes")
+        } else {
+            style::bad("NO")
+        };
+        row("plan date", format!("{d}: {mark}"));
+    }
     println!("{}", h.attribution);
     Ok(Outcome::Ok)
 }

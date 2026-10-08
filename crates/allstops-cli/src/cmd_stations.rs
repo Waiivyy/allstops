@@ -30,7 +30,7 @@ pub fn run(args: Args, json: bool) -> Result<Outcome> {
         anyhow::bail!("stations needs a GTFS zip; `allstops inspect` shows what a pack holds");
     }
     let feed = Feed::from_zip_bytes(&bytes, &Limits::default())?;
-    let attribution = crate::plan_input::feed_ref(&bytes, &feed).attribution;
+    let attribution = crate::plan_input::feed_ref(&bytes, &feed, &args.zip).attribution;
     let overrides: StationOverrides = match &args.overrides {
         Some(p) => toml::from_str(
             &std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?,
