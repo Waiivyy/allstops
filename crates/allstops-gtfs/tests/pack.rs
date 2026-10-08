@@ -2,6 +2,7 @@
 //! the same bytes, a pack of another format version is rejected with a clear
 //! message, and a network built from a pack equals one built from the feed.
 
+use allstops_core::network::Network;
 use allstops_core::rules::Rules;
 use allstops_gtfs::calendar::ServiceCalendar;
 use allstops_gtfs::cluster::{ClusterConfig, Clustering, cluster};
@@ -16,6 +17,13 @@ use allstops_gtfs::{Feed, Limits};
 /// variant, and a bus (S3 to S4) on its own service. Station S2 has a
 /// U-Bahn platform, a tram platform and an entrance.
 fn zip() -> Vec<u8> {
+    zip_with_transfers(
+        "from_stop_id,to_stop_id,transfer_type,min_transfer_time\n\
+         S2a,S2b,2,180\nS3a,S4a,2,240\n",
+    )
+}
+
+fn zip_with_transfers(transfers: &str) -> Vec<u8> {
     minimal_with(&[
         (
             "stops.txt",
@@ -56,11 +64,7 @@ fn zip() -> Vec<u8> {
             "frequencies.txt",
             "trip_id,start_time,end_time,headway_secs,exact_times\nTF,06:00:00,07:00:00,1200,1\n",
         ),
-        (
-            "transfers.txt",
-            "from_stop_id,to_stop_id,transfer_type,min_transfer_time\n\
-             S2a,S2b,2,180\nS3a,S4a,2,240\n",
-        ),
+        ("transfers.txt", transfers),
         (
             "feed_info.txt",
             "feed_publisher_name,feed_publisher_url,feed_lang,feed_version\nTest,https://example.org,de,v1\n",
@@ -80,7 +84,10 @@ struct Input {
 }
 
 fn input() -> Input {
-    let zip = zip();
+    input_from(zip())
+}
+
+fn input_from(zip: Vec<u8>) -> Input {
     let feed = Feed::from_zip_bytes(&zip, &Limits::default()).unwrap();
     let clustering = cluster(&feed, &ClusterConfig::default());
     let sel = Selection {
@@ -113,7 +120,10 @@ fn header() -> PackHeader {
 }
 
 fn build_with(walks: &WalkOverrides) -> Vec<u8> {
-    let i = input();
+    pack_of(&input(), walks)
+}
+
+fn pack_of(i: &Input, walks: &WalkOverrides) -> Vec<u8> {
     pack::build(
         &PackSource {
             zip: &i.zip,
@@ -401,4 +411,64 @@ proptest::proptest! {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| use_pack(&bytes)));
         proptest::prop_assert!(r.is_ok(), "panic after {edits:?}, cut {cut:?}");
     }
+}
+
+/// Networks for `date` with tram connectors, from the feed and from its pack.
+fn networks(i: &Input, p: &pack::Pack, date: &str, walks: &WalkOverrides) -> (Network, Network) {
+    let rules = Rules {
+        date: date.into(),
+        connector_modes: vec!["tram".into()],
+        ..Rules::default()
+    };
+    let from_feed = build_network(
+        &i.feed,
+        &ServiceCalendar::new(&i.feed),
+        &i.clustering,
+        &i.targets,
+        &[1..=1],
+        &rules,
+        walks,
+    )
+    .unwrap()
+    .0;
+    let from_pack = build_network(
+        &p.feed,
+        &ServiceCalendar::new(&p.feed),
+        &p.clustering,
+        &p.targets,
+        &[1..=1],
+        &rules,
+        &p.walks,
+    )
+    .unwrap()
+    .0;
+    (from_feed, from_pack)
+}
+
+#[test]
+fn transfer_rows_for_routes_outside_the_network_do_not_apply() {
+    // These rows name the bus, which is not a connector here, so they can
+    // never match a change in the network: neither the feed nor the pack
+    // applies them, and a forbidden transfer does not stop planning.
+    let header =
+        "from_stop_id,to_stop_id,transfer_type,min_transfer_time,from_route_id,from_trip_id";
+    for row in ["S2a,S2b,2,900,B,", "S2a,S2b,3,,B,", "S2a,S2b,2,900,,T3"] {
+        let i = input_from(zip_with_transfers(&format!("{header}\n{row}\n")));
+        let p = pack::read(&pack_of(&i, &WalkOverrides::default()), &Limits::default()).unwrap();
+        let (a, b) = networks(&i, &p, "2026-11-12", &WalkOverrides::default());
+        assert!(
+            postcard::to_allocvec(&a).unwrap() == postcard::to_allocvec(&b).unwrap(),
+            "{row}"
+        );
+        let s2 = a.stations.iter().position(|s| s.id == "S2").unwrap();
+        assert_eq!(a.change_time[s2], 60, "{row}");
+    }
+    // A row for a route the network holds still applies.
+    let i = input_from(zip_with_transfers(&format!(
+        "{header}\nS2a,S2b,2,900,TR,\n"
+    )));
+    let p = pack::read(&pack_of(&i, &WalkOverrides::default()), &Limits::default()).unwrap();
+    let (a, b) = networks(&i, &p, "2026-11-12", &WalkOverrides::default());
+    let s2 = a.stations.iter().position(|s| s.id == "S2").unwrap();
+    assert_eq!((a.change_time[s2], b.change_time[s2]), (900, 900));
 }

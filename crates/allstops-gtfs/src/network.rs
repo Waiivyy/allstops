@@ -293,8 +293,18 @@ pub fn build_network(
         walk_overrides_applied = add_footpaths(&mut network, rules, &walk_overrides)?;
         walk_overrides_unused += walk_overrides.len() - walk_overrides_applied;
     }
-    let (stations_raised, walks_raised) =
-        apply_transfers(feed, clustering, &station_map, &mut network)?;
+    let route_in_network: Vec<bool> = feed
+        .routes
+        .iter()
+        .map(|r| in_ranges(r.route_type, visit_types) || in_ranges(r.route_type, &connector))
+        .collect();
+    let (stations_raised, walks_raised) = apply_transfers(
+        feed,
+        clustering,
+        &station_map,
+        &route_in_network,
+        &mut network,
+    )?;
     network.validate().map_err(|m| Error::File {
         file: "network".into(),
         message: format!("internal check failed: {m}"),
@@ -348,11 +358,14 @@ pub fn build_network(
 /// requirement is never above the largest minimum applied here, so plans
 /// satisfy it. Forbidden transfers (`transfer_type = 3`) need per-stop
 /// labels that the scan does not have yet; a feed that forbids a transfer
-/// inside the network is refused rather than planned wrongly.
+/// inside the network is refused rather than planned wrongly. A row that
+/// names a route or trip outside the network can match no change in it and
+/// is skipped.
 fn apply_transfers(
     feed: &Feed,
     clustering: &Clustering,
     station_map: &HashMap<u32, StationIdx>,
+    route_in_network: &[bool],
     network: &mut Network,
 ) -> Result<(usize, usize)> {
     let net_station = |stop: Option<u32>| -> Option<StationIdx> {
@@ -362,10 +375,20 @@ fn apply_transfers(
     let mut forbidden = 0;
     let mut raised_stations = std::collections::BTreeSet::new();
     let mut raised_walks = 0;
+    let route_ok = |r: Option<u32>| r.is_none_or(|r| route_in_network[r as usize]);
+    let trip_ok =
+        |t: Option<u32>| t.is_none_or(|t| route_in_network[feed.trips[t as usize].route as usize]);
     for t in &feed.transfers {
         let (Some(a), Some(z)) = (net_station(t.from_stop), net_station(t.to_stop)) else {
             continue;
         };
+        if !(route_ok(t.from_route)
+            && route_ok(t.to_route)
+            && trip_ok(t.from_trip)
+            && trip_ok(t.to_trip))
+        {
+            continue;
+        }
         match (t.transfer_type, t.min_transfer_time) {
             (3, _) => forbidden += 1,
             (2, Some(m)) if a == z => {
