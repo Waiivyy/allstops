@@ -36,8 +36,8 @@ Crates (`crates/`):
 The verifier's dependency tree contains no solver code: `allstops-gtfs` is
 used without its `network` feature, and a test fails if that changes.
 `allstops-core` and `allstops-gtfs` take bytes, never paths, and use no
-threads, files or network, so they are meant to compile unchanged for
-WebAssembly. That has not been tested yet (see WebAssembly below).
+threads, files or network, so they compile unchanged for WebAssembly (see
+WebAssembly below).
 
 ## GTFS loading
 
@@ -61,8 +61,8 @@ three sets. The deciding reasons are not speed:
   browser.
 - It rejects a whole feed for one dangling reference, silently keeps the last
   of duplicate IDs, and does not fill in omitted times.
-- allstops reads from bytes only, which is what a WebAssembly build needs
-  (not yet compiled for WebAssembly; see below).
+- allstops reads from bytes only, which is what a WebAssembly build needs,
+  and compiles for WebAssembly (see below).
 
 Neither loader expands `frequencies.txt` yet; MVV has none. That is Stage 1
 work.
@@ -157,11 +157,17 @@ graph to solve.
 
 ## WebAssembly
 
-The core crates read only bytes and use no threads, files or network, but the
-WebAssembly build has not been compiled yet: the Homebrew Rust toolchain on the
-development machine ships only the host standard library and no `wasm-ld`, and
-`rustup` cannot add targets to it. Adding a rustup-managed toolchain is a
-prerequisite for Stage 4.
+`allstops-core`, `allstops-gtfs` and `allstops-verify` compile for
+`wasm32-unknown-unknown` without changes or warnings. Checked with a
+rustup-managed stable toolchain (Rust 1.99.0) next to the Homebrew one, which
+cannot add targets:
+
+```bash
+PATH="$(brew --prefix rustup)/bin:$PATH" cargo +stable check --target wasm32-unknown-unknown --target-dir target/wasm-check -p allstops-core -p allstops-gtfs -p allstops-verify
+```
+
+Linking, running and measuring in a browser come with the bindings in
+Stage 4.
 
 ## Licences and attribution
 
