@@ -54,8 +54,10 @@ Regional trains (RB and RE lines) are `route_type = 2`.
 allstops follows the published route types, so the connector mode `"tram"`
 also lets a runner ride the S-Bahn in Munich, and routes do use it (for
 example S1 from Moosach to Feldmoching). The solver and the verifier agree,
-because both read the same field. A per-feed override of route types is
-planned for Stage 1 so that a selection can name the modes it means.
+because both read the same field. The Munich rules allow both tram and rail
+as connectors, so the coding changes no Munich result. A per-feed override of
+route types, so that a selection or a rules file can name the modes it means,
+was planned for Stage 1 and is not done yet.
 
 ### Warnings
 
@@ -94,20 +96,47 @@ November 2026.
 
 ### Service on the plan dates checked
 
-With the default rules (04:30 to 26:00, tram and bus as connectors):
+With the Munich rules (`data/rules/mvv-ubahn.toml`: 04:30 to 26:00, tram,
+bus and rail as connectors):
 
 | Date | Day | Network (trips / connections / stations / walk links) | Result |
 |---|---|---|---|
-| 2026-10-06 | Tue | 43,800 / 773,088 / 8,989 / 88,576 | infeasible: Neuperlach Süd, Therese-Giehse-Allee and Poccistraße have no U-Bahn service |
-| 2026-10-10 | Sat | 30,690 / 538,891 / 6,636 / 70,616 | infeasible: same three stations |
-| 2026-11-09 | Mon | 42,322 / 778,244 / 8,988 / 88,868 | greedy route found and verified |
-| 2026-11-12 | Thu | 42,258 / 778,688 / 8,987 / 88,842 | greedy route found and verified |
-| 2026-11-14 | Sat | 29,096 / 542,282 / 6,560 / 70,622 | greedy route found and verified |
+| 2026-10-06 | Tue | 44,987 / 785,705 / 9,189 / 88,946 | infeasible: Neuperlach Süd, Therese-Giehse-Allee and Poccistraße have no U-Bahn service |
+| 2026-10-10 | Sat | 31,725 / 549,634 / 6,851 / 70,914 | infeasible: same three stations |
+| 2026-11-09 | Mon | 43,488 / 791,196 / 9,193 / 89,236 | greedy route 4:26:40, verified |
+| 2026-11-12 | Thu | 43,424 / 791,649 / 9,192 / 89,210 | greedy route 4:29:10, verified |
+| 2026-11-14 | Sat | 30,109 / 553,746 / 6,779 / 70,932 | greedy route 4:45:50, verified |
+
+Adding rail as a connector (Stage 1) made the networks slightly larger and
+left all three route times unchanged.
 
 The October gaps match the operator's announcements of construction closures
 (U5 cut back with replacement buses to Neuperlach Süd, the Poccistraße
 renovation). The feed shows Lehel as served in this period even though a U4
 closure there was announced; the planner follows the feed.
+
+### Network pack
+
+`allstops pack data/cache/mvv.gtfs.zip --rules data/rules/mvv-ubahn.toml`
+writes the Munich U-Bahn pack. With tram, bus and rail as connectors it keeps
+every trip of the feed (115,225 trips, 2,217,866 stop times, 899 routes,
+28,170 stops, all 9,309 stations); it leaves out `shapes.txt` and the two
+ticketing files. The size saving comes from the encoding, not the filtering:
+
+| | |
+|---|---|
+| Pack | 3,143,506 bytes, 17.6% of the 17,880,036-byte zip |
+| Body before compression | 15,020,610 bytes |
+| Stop patterns / timing patterns | 9,317 / 10,397 for 115,225 trips |
+| Build | about 2.25 s (3 runs) |
+| Load | median 58 ms over 6 runs, against median 637 ms for the zip |
+| Network for one date | about 60 ms on top (2026-11-14, 553,746 connections) |
+| Determinism | two builds give the same SHA-256 (`e7b164e7…0de50f3b` for allstops 0.0.1) |
+
+Measured on an Apple M5 while the machine was busy (load average 15 to 18),
+so absolute times are rough. A solve from the pack and one from the zip give
+byte-identical itinerary JSON for 2026-11-12, and each itinerary verifies
+against the other source.
 
 ### Shapes
 

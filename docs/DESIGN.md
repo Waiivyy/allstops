@@ -103,15 +103,18 @@ and alight stops, not the intermediate calls the visit tracking needs.
 
 ## Pack format
 
-**Decision: postcard**, behind a pack header carrying a format version, the
-feed SHA-256, the selection and rules hashes, the validity range and the
-attribution text (Stage 1). `bincode` was excluded: the project is
-discontinued, 3.0.0 is a tombstone release and RUSTSEC-2025-0141 marks it
-unmaintained.
+**Decision: postcard**, compressed with deflate, behind a header carrying a
+format version, the feed SHA-256, the selection, rules and override hashes,
+the validity range and the attribution text. `bincode` was excluded: the
+project is discontinued, 3.0.0 is a tombstone release and RUSTSEC-2025-0141
+marks it unmaintained.
+
+### Serialisation format (Stage 0)
 
 Measured with `cargo xtask pack` on the Munich network for 2026-11-12 (8,987
-stations, 42,258 trips, 778,688 connections, 88,842 walk links), median of 5
-after a warm-up, on a busy machine (load average 3.3 to 3.8):
+stations, 42,258 trips, 778,688 connections, 88,842 walk links, the Stage 0
+rules with tram and bus connectors), median of 5 after a warm-up, on a busy
+machine (load average 3.3 to 3.8):
 
 | Format | Bytes | Deflated (-6) | Encode | Validated access | Decode to `Network` | Deterministic |
 |---|---|---|---|---|---|---|
@@ -129,10 +132,70 @@ or 11 more crates in the core. Its archive compatibility is tied to rkyv's
 semver, and its CI does not test wasm32. Decode time in WebAssembly is not
 measured yet (no wasm target installed).
 
-The content matters more than the format: connections are 64% of the postcard
-bytes and 95% of them belong to tram and bus connector trips; `trip_conns`
-(16% of the pack) can be rebuilt at load time instead of shipped. Both are
-Stage 1 work.
+The content mattered more than the format: connections were 64% of those
+bytes, and 95% of them belonged to tram and bus connector trips.
+
+### What a pack holds (Stage 1)
+
+A pack is not a network for one date. The date and most rules (walking
+speed, detour factor, maximum walk, transfer minimums, time window, start
+station) change from one plan to the next, and a network bakes all of them
+in. A pack holds what stays fixed: the part of the feed a selection can use
+with its connector modes, the stations after clustering and overrides, the
+targets and the walk overrides. A network for any date in the validity range,
+under any rules that keep the pack's selection, overrides and connector
+modes, is built from it in about 60 ms on the Munich pack, by the same code
+that builds it from a zip.
+
+How it is built (`allstops-gtfs/src/pack.rs`):
+
+1. Keep the routes of the target and connector route types, their trips,
+   stop times, frequencies and services, every stop of every station a kept
+   trip calls at (and of their parents' stations), and the transfers between
+   kept stops, routes and trips. Rows are copied from the GTFS files field for
+   field into a subset, and the normal loader reads the subset, so time
+   interpolation, frequency expansion and every check apply exactly as for a
+   zip.
+2. Store the loaded tables with postcard. Stop times, nearly all of the data,
+   are split into deduplicated stop patterns (stops, sequence numbers, pickup
+   and drop-off types) and timing patterns (times relative to the trip's first
+   departure); each trip keeps one (stop pattern, timing pattern, first
+   departure) triple. Deflate the result at level 9.
+3. Write the header and a SHA-256 trailer, then read the pack back and refuse
+   to finish unless it gives exactly the loaded subset.
+
+Reading checks the magic bytes, the format version (a pack of any other
+version is refused with a message to rebuild it), the checksum, the size
+limits, and every index in the decoded tables, so a crafted pack ends in an
+error, never a panic. The same input gives the same bytes: fixed file order,
+no timestamps, first-seen pattern order and a fixed compression level.
+
+The hashes in the header are SHA-256 of the canonical JSON (fields in
+declaration order) of the parsed selection, rules, station overrides and
+walks; an override hash is absent when its file is absent or empty. `solve`
+and `verify` accept rules with a pack only when these match and the rules
+name no connector mode the pack lacks.
+
+Measured on Munich (details in `docs/DATA.md`): 3,143,506 bytes, 17.6% of
+the zip, loading in a median of 58 ms against 637 ms for the zip. Two
+alternatives were measured and rejected:
+
+| Pack content | Bytes | Load |
+|---|---|---|
+| The network for one date (Stage 0 table above, postcard plus deflate) | 13,600,424 | 15.7 to 16.1 ms to decode (inflating not measured), but one pack per date and per rules |
+| The subset as a GTFS zip (CSV rows, deflate level 6) | 18,045,310 | 533 ms, about the same as the full zip |
+| The subset as loaded tables with stop and timing patterns (chosen) | 3,143,506 | 58 ms |
+
+The pack lives in `allstops-gtfs`, not in `allstops-core` as first sketched,
+because what it stores is feed tables and stations, which are that crate's
+types; the core stays free of GTFS.
+
+**The verifier and packs.** Checking against a pack reads the decoded tables,
+the same structures the verifier reads from a zip, so the verifier's logic is
+unchanged; the round trip in step 3 guards the decoding. The strongest check
+stays available: an itinerary records the full feed's SHA-256, so it can
+always be verified against the original zip with
+`allstops verify <zip> <itinerary> --rules <rules>`.
 
 ## Lower bound
 

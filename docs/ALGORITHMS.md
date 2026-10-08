@@ -1,12 +1,13 @@
 # Algorithms
 
 This page explains how allstops plans a route, written for a curious engineer.
-It covers what exists after Stage 0; later stages extend it.
+It covers what exists after Stage 1; later stages extend it.
 
 ## The network for one plan
 
-A plan works on one **network**, built from the feed for the plan date
-(`allstops-gtfs/src/network.rs`):
+A plan works on one **network**, built for the plan date from the feed or
+from a network pack, which holds the same tables (`allstops-gtfs/src/network.rs`,
+`docs/DESIGN.md`):
 
 - **Stations** are clusters of GTFS stops (see `docs/DATA.md`). Routing,
   visits and every output work on stations.
@@ -21,7 +22,8 @@ A plan works on one **network**, built from the feed for the plan date
   origins in the feed's time zone (25 or 23 hours across daylight-saving
   changes, 24 otherwise).
 - **Walk links** join stations within `max_walk_m`; their duration already
-  includes the walk-link minimum (`docs/RULES.md`).
+  includes the walk-link minimum (`docs/RULES.md`). A walks file can replace a
+  link's estimated time with a measured one or remove the link.
 
 Only trips of the target mode and of the allowed connector modes enter the
 network, and only those that overlap the time window.
