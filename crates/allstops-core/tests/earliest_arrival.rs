@@ -335,25 +335,43 @@ proptest! {
 }
 
 /// The journey rules, checked independently of the scan: every ride
-/// boards where pickup is allowed and alights where drop-off is allowed;
-/// every departure is no earlier than the previous arrival plus the
-/// station's change time, or the end of a walk (whose duration already
+/// boards where pickup is allowed and alights where drop-off is allowed
+/// (a runner who starts aboard may only leave that train where drop-off is
+/// allowed); every departure is no earlier than the previous arrival plus
+/// the station's change time, or the end of a walk (whose duration already
 /// includes the walk-link minimum); walks follow a footpath at its duration,
 /// start no earlier than the arrival, and never follow a walk or a boarding
-/// origin. A journey that ends aboard has not alighted from its last ride;
-/// one that ends boarding must be able to board there.
+/// origin; only a first ride may continue the origin trip, from where the
+/// runner is on it; and the journey's end is where its last leg leaves the
+/// runner.
 fn check_journey(net: &Network, o: Origin, legs: &[JLeg], end: End) -> Result<(), String> {
+    let hop =
+        |trip: u32, pos: u16| net.connections[net.trip_connections(trip)[pos as usize] as usize];
     let (station, time) = o.place(net);
     // Where the runner is, when they got there, the earliest departure they
-    // can catch there, and whether a walk is allowed next.
+    // can catch there, whether they may leave the train they are on, and
+    // whether a walk is allowed next.
     let mut at = station;
     let mut arrived: Time = time;
-    let mut ready: Time = match o {
-        Origin::Aboard { .. } => time + net.change_time[station as usize],
-        _ => time,
+    let (mut ready, mut can_leave): (Time, bool) = match o {
+        Origin::Aboard { trip, pos, .. } => (
+            time + net.change_time[station as usize],
+            hop(trip, pos).has(flag::DROP_OFF),
+        ),
+        _ => (time, true),
     };
     let mut may_walk = !matches!(o, Origin::Boarding { .. });
     for (i, leg) in legs.iter().enumerate() {
+        let continues = matches!(
+            *leg,
+            JLeg::Ride {
+                continues_origin: true,
+                ..
+            }
+        );
+        if !continues && !can_leave {
+            return Err("leaves a train where drop-off is not allowed".into());
+        }
         match *leg {
             JLeg::Walk {
                 from,
@@ -390,13 +408,21 @@ fn check_journey(net: &Network, o: Origin, legs: &[JLeg], end: End) -> Result<()
                 to_pos,
                 continues_origin,
             } => {
-                let cs = net.trip_connections(trip);
-                let board = &net.connections[cs[from_pos as usize] as usize];
-                let alight = &net.connections[cs[to_pos as usize] as usize];
+                let board = hop(trip, from_pos);
+                let alight = hop(trip, to_pos);
                 if board.dep_station != at {
                     return Err(format!("ride from {}, runner at {at}", board.dep_station));
                 }
-                if !(i == 0 && continues_origin) {
+                if continues_origin {
+                    let expected = match o {
+                        Origin::Aboard { trip, pos, .. } => Some((trip, pos + 1)),
+                        Origin::Boarding { trip, pos, .. } => Some((trip, pos)),
+                        Origin::At { .. } => None,
+                    };
+                    if i != 0 || expected != Some((trip, from_pos)) {
+                        return Err("only the first ride may continue the origin trip, from where the runner is".into());
+                    }
+                } else {
                     if !board.has(flag::PICKUP) {
                         return Err("boards where pickup is not allowed".into());
                     }
@@ -407,10 +433,6 @@ fn check_journey(net: &Network, o: Origin, legs: &[JLeg], end: End) -> Result<()
                         ));
                     }
                 }
-                let stays_aboard = i + 1 == legs.len() && matches!(end, End::Aboard { .. });
-                if !stays_aboard && !alight.has(flag::DROP_OFF) {
-                    return Err("alights where drop-off is not allowed".into());
-                }
                 let a = alight.arr_station;
                 (at, arrived, ready, may_walk) = (
                     a,
@@ -418,16 +440,121 @@ fn check_journey(net: &Network, o: Origin, legs: &[JLeg], end: End) -> Result<()
                     alight.arr + net.change_time[a as usize],
                     true,
                 );
+                can_leave = alight.has(flag::DROP_OFF);
             }
         }
     }
-    if let End::Boarding { trip, pos, .. } = end
-        && !legs.is_empty()
-    {
-        let c = &net.connections[net.trip_connections(trip)[pos as usize] as usize];
-        if c.dep_station != at || !c.has(flag::PICKUP) || c.dep < ready {
-            return Err(format!("cannot board at the end: at {at}, ready {ready}"));
+    match end {
+        // Boarding at the end, possibly right at the origin.
+        End::Boarding { trip, pos, .. } => {
+            let c = hop(trip, pos);
+            let same_as_origin = legs.is_empty() && end.as_origin() == o;
+            if !same_as_origin
+                && (!can_leave || c.dep_station != at || !c.has(flag::PICKUP) || c.dep < ready)
+            {
+                return Err(format!("cannot board at the end: at {at}, ready {ready}"));
+            }
+        }
+        End::Aboard { trip, pos, .. } => match legs.last() {
+            Some(&JLeg::Ride {
+                trip: t, to_pos, ..
+            }) if (t, to_pos) == (trip, pos) => {}
+            None if end.as_origin() == o => {}
+            _ => return Err("ends aboard a train the last ride is not on".into()),
+        },
+        End::At { .. } => {
+            if !(legs.is_empty() && end.as_origin() == o) {
+                return Err("only a journey without legs ends standing at the origin".into());
+            }
         }
     }
     Ok(())
+}
+
+#[test]
+fn the_journey_checker_rejects_broken_journeys() {
+    // A: S0 -> S1 -> S2 (no drop-off at S1); B: S1 -> S2; walk S1 -> S0.
+    let mut b = with_stations(3, 60);
+    let mut a = vec![call(0, 0, 0), call(1, 100, 100), call(2, 200, 200)];
+    a[1].drop_off = false;
+    b.add_trip(trip("A", true), &a);
+    line(&mut b, "B", &[(1, 300), (2, 400)], true);
+    b.add_footpath(1, 0, 120, 100.0);
+    let net = b.build();
+    let aboard_at_s1 = Origin::Aboard {
+        trip: 0,
+        pos: 0,
+        time: 100,
+    };
+    let walk = JLeg::Walk {
+        from: 1,
+        to: 0,
+        start: 100,
+        end: 220,
+        metres: 100.0,
+    };
+    let ride = |trip, from_pos, to_pos, continues_origin| JLeg::Ride {
+        trip,
+        from_pos,
+        to_pos,
+        continues_origin,
+    };
+    let end_at = |station, time| End::At { station, time };
+    // Staying on A to S2 is fine.
+    assert!(
+        check_journey(
+            &net,
+            aboard_at_s1,
+            &[ride(0, 1, 1, true)],
+            End::Aboard {
+                trip: 0,
+                pos: 1,
+                time: 200
+            }
+        )
+        .is_ok()
+    );
+    // Getting off A at S1, where drop-off is not allowed.
+    assert!(check_journey(&net, aboard_at_s1, &[walk], end_at(0, 220)).is_err());
+    assert!(
+        check_journey(
+            &net,
+            aboard_at_s1,
+            &[ride(1, 0, 0, false)],
+            End::Aboard {
+                trip: 1,
+                pos: 0,
+                time: 400
+            }
+        )
+        .is_err()
+    );
+    // A ride claiming to continue the origin trip that is another trip.
+    assert!(
+        check_journey(
+            &net,
+            aboard_at_s1,
+            &[ride(1, 0, 0, true)],
+            End::Aboard {
+                trip: 1,
+                pos: 0,
+                time: 400
+            }
+        )
+        .is_err()
+    );
+    // An end that does not match the last ride.
+    assert!(
+        check_journey(
+            &net,
+            aboard_at_s1,
+            &[ride(0, 1, 1, true)],
+            End::Aboard {
+                trip: 1,
+                pos: 0,
+                time: 400
+            }
+        )
+        .is_err()
+    );
 }
