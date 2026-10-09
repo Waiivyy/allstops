@@ -10,10 +10,10 @@ Berlin, New York and many other networks. Every route is replayed against the
 raw timetable by an independent verifier before it is shown, and every result
 comes with a lower bound, a time that no route under the same rules can beat.
 
-> **Status: early development. Stage 1 of 6 (data layer) is complete.** The
-> command-line tool can fetch and profile a feed, build stations with manual
-> corrections, write a compact network pack, plan a first route, verify it and
-> bound it. Route optimisation, exports, the browser planner and the live run
+> **Status: early development. Stage 2 of 6 (routing and verifier) is
+> complete.** The command-line tool can fetch and profile a feed, build
+> stations with manual corrections, write a compact network pack, plan a first
+> route, verify it and bound it. Route optimisation, exports, the browser planner and the live run
 > mode are on the [roadmap](#roadmap).
 
 ## Highlights
@@ -163,9 +163,13 @@ flowchart TD
    finds the earliest time each station can be visited, aboard a train that
    stops there or by boarding one. A greedy heuristic repeatedly travels to the
    unvisited target that can be visited first, from every target station and
-   several start times, and keeps the shortest route.
+   several start times, and keeps the shortest route. Profile queries answer
+   "when can I first visit X if I am ready here at time t" for every time at
+   once, which the route optimisation in Stage 3 builds on.
 4. **Verification.** The route is written as a versioned JSON itinerary that
-   names trips and stops by their GTFS IDs, then checked by `allstops-verify`.
+   names trips and stops by their GTFS IDs
+   ([schema](docs/schema/itinerary-0.schema.json)), then checked by
+   `allstops-verify`.
 5. **Bounds.** Two relaxations of the visiting order, solved with Held-Karp
    1-trees: one on fastest static travel times, one on the least time from any
    visit of a station to the earliest reachable visit of another, computed with
@@ -241,6 +245,8 @@ The defaults for Munich (`data/rules/mvv-ubahn.toml`):
   ([docs/RULES.md](docs/RULES.md#override-files)). Munich uses neither.
 - Time runs from the first visit to the last, between 04:30 and 26:00 of the
   plan date's service day.
+- Staying aboard when a train continues as another trip at its terminus is an
+  option, off by default ([docs/RULES.md](docs/RULES.md#staying-aboard-through-a-terminus)).
 
 Walking speed, detour factor and transfer buffers are assumptions, not
 measurements. [docs/RULES.md](docs/RULES.md) defines every option and compares
@@ -257,7 +263,10 @@ cargo xtask bench                            # synthetic and real networks, writ
 - **Routing** is checked against a separate brute-force oracle (Dijkstra over
   explicit states) on random networks, including hops that take no time; a
   long run of 100,000 networks agrees, deliberately broken variants are caught,
-  and an independent RAPTOR implementation gives identical labels.
+  and an independent RAPTOR implementation gives identical labels. Every
+  journey is also checked against the journey rules (pickup, drop-off, change
+  times, walks), and profile queries are checked against forward queries on
+  the same 100,000 networks and on 6,000 Munich queries.
 - **The verifier** has mutation tests: a valid itinerary passes, and each
   single mutation (a departure too soon after an arrival, a wrong service date,
   a trip that does not call at the alighting stop, boarding where pickup is not
@@ -265,6 +274,12 @@ cargo xtask bench                            # synthetic and real networks, writ
   station, overlapping legs) is rejected with the expected code.
 - **Bounds** are asserted to be at most the exact optimum, found by exhaustive
   search, on every small synthetic network in the benchmark.
+- **Visit semantics** are tested from GTFS rows on both sides: pass-through
+  calls count only when the rules say so, boarding and arriving aboard count,
+  walking does not, and staying aboard through a terminus works only with the
+  rule on and only along a real continuation.
+- **Itineraries** written by the planner validate against the published JSON
+  Schema, and the schema rejects broken documents.
 - **Packs** build to identical bytes twice, a pack of another format version
   is refused with a clear message, and a network built from a pack is
   byte-identical to one built from the feed, on test feeds and on Munich.
@@ -299,7 +314,7 @@ and `cargo xtask bound-tuning`.
 |---|---|---|
 | 0 | Data profiling, feasibility spike, benchmark harness, design, review | done |
 | 1 | Data layer: overrides, footpaths with measured walks, deterministic network packs | done |
-| 2 | Routing and verifier: profile queries, larger property suites against a time-expanded oracle | planned |
+| 2 | Routing and verifier: profile queries, staying aboard through a terminus, itinerary schema, larger property suites | done |
 | 3 | Solver: corridor decomposition, stronger bounds, local search, robustness, replanning, exports | planned |
 | 4 | Web planner: the engine in WebAssembly, map replay, prebuilt packs | planned |
 | 5 | Live run mode: offline phone view, "missed it" replanning, more cities | planned |
