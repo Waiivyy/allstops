@@ -22,15 +22,24 @@ const STOP_TIMES: &str = "trip_id,arrival_time,departure_time,stop_id,stop_seque
     B,08:10:30,08:10:30,S2b,1,1,1\nB,08:30:00,08:30:00,S3a,2,1,0\n";
 
 fn check(trips: &str, doc: &Value) -> Vec<&'static str> {
-    let feed = Feed::from_zip_bytes(
-        &minimal_with(&[
-            ("stops.txt", STOPS),
-            ("trips.txt", trips),
-            ("stop_times.txt", STOP_TIMES),
-        ]),
-        &Limits::default(),
-    )
-    .unwrap();
+    check_with(trips, STOP_TIMES, None, doc)
+}
+
+fn check_with(
+    trips: &str,
+    stop_times: &str,
+    transfers: Option<&str>,
+    doc: &Value,
+) -> Vec<&'static str> {
+    let mut files = vec![
+        ("stops.txt", STOPS),
+        ("trips.txt", trips),
+        ("stop_times.txt", stop_times),
+    ];
+    if let Some(t) = transfers {
+        files.push(("transfers.txt", t));
+    }
+    let feed = Feed::from_zip_bytes(&minimal_with(&files), &Limits::default()).unwrap();
     let cal = ServiceCalendar::new(&feed);
     let c = cluster(&feed, &ClusterConfig::default());
     let targets: Vec<String> = ["S1", "S2", "S3"].iter().map(|s| s.to_string()).collect();
@@ -159,4 +168,28 @@ fn staying_aboard_needs_a_real_continuation() {
     )];
     let codes = check(BLOCK, &doc(true, legs));
     assert!(codes.contains(&"NOT_A_CONTINUATION"), "{codes:?}");
+}
+
+#[test]
+fn a_repeated_linked_trips_row_is_one_link() {
+    let none = "route_id,service_id,trip_id,trip_headsign\nR,WD,A,Two\nR,WD,B,Three\n";
+    let twice = "from_stop_id,to_stop_id,from_trip_id,to_trip_id,transfer_type,min_transfer_time\n\
+                 ,,A,B,4,\n,,A,B,4,\n";
+    assert_eq!(
+        check_with(none, STOP_TIMES, Some(twice), &doc(true, through())),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn a_one_stop_trip_in_the_block_comes_between() {
+    // The vehicle runs C, a single call at S2, between A and B: A does not
+    // continue as B.
+    let trips = "route_id,service_id,trip_id,trip_headsign,block_id\n\
+                 R,WD,A,Two,X\nR,WD,C,Two,X\nR,WD,B,Three,X\n";
+    let stop_times = format!("{STOP_TIMES}C,08:10:10,08:10:10,S2a,1,1,1\n");
+    assert_eq!(
+        check_with(trips, &stop_times, None, &doc(true, through())),
+        vec!["NOT_A_CONTINUATION"]
+    );
 }

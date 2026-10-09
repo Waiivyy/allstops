@@ -296,78 +296,131 @@ impl<'f> Transfers<'f> {
     }
 }
 
-/// Whether trip `z` is the next trip the vehicle of trip `a` runs on
-/// service date `sd`, so a runner may stay aboard from `a`'s last stop into
-/// `z`. From the GTFS reference: a linked-trips row (`transfer_type = 4`)
-/// from `a` names the next trip; without one, the next trip of `a`'s block
-/// (same `block_id`, running on `sd`, by first departure) is, unless a
-/// `transfer_type = 5` row forbids it. Only one-to-one continuations count,
-/// `z` must start at the station where `a` ends, no earlier than `a`
-/// arrives there, and both must be of the same kind (counting as visits or
-/// not).
-fn continues(ctx: &Context, a: u32, z: u32, sd: NaiveDate) -> bool {
-    let feed = ctx.feed;
-    let running = |t: u32| {
-        let trip = &feed.trips[t as usize];
-        !trip.frequency_template
-            && !feed.trip_stop_times(t).is_empty()
-            && ctx.calendar.is_active(trip.service, sd)
-    };
-    let next_of = |a: u32| -> Option<u32> {
-        let mut linked: Vec<u32> = feed
-            .transfers
-            .iter()
-            .filter(|t| t.transfer_type == 4 && t.from_trip == Some(a))
-            .filter_map(|t| t.to_trip)
-            .filter(|&t| running(t))
-            .collect();
-        linked.sort_unstable();
-        linked.dedup();
-        if !linked.is_empty() {
-            return (linked.len() == 1).then(|| linked[0]);
+/// Which trip each vehicle runs next, so a runner may stay aboard from a
+/// trip's last stop into the next. From the GTFS reference: a linked-trips
+/// row (`transfer_type = 4`) from a trip names the next trip; without one,
+/// the next trip of its block (same `block_id`, running on the same service
+/// date, by first departure) is, unless a `transfer_type = 5` row forbids
+/// it. Only one-to-one continuations count; the next trip must start at the
+/// station where the trip ends, no earlier than it arrives there; both need
+/// at least two calls and must be of the same kind (counting as visits or
+/// not). Worked out once per service date, on first use.
+struct InSeat<'c> {
+    ctx: &'c Context<'c>,
+    linked: HashMap<u32, Vec<u32>>,
+    vetoed: std::collections::HashSet<(u32, u32)>,
+    blocks: HashMap<&'c str, Vec<u32>>,
+    by_date: HashMap<NaiveDate, HashMap<u32, u32>>,
+}
+
+impl<'c> InSeat<'c> {
+    fn new(ctx: &'c Context<'c>) -> Self {
+        let feed = ctx.feed;
+        let mut linked: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut vetoed = std::collections::HashSet::new();
+        for t in &feed.transfers {
+            if let (Some(a), Some(z)) = (t.from_trip, t.to_trip) {
+                match t.transfer_type {
+                    4 => linked.entry(a).or_default().push(z),
+                    5 => {
+                        vetoed.insert((a, z));
+                    }
+                    _ => {}
+                }
+            }
         }
-        let block = &feed.trips[a as usize].block_id;
-        if block.is_empty() {
-            return None;
+        let mut blocks: HashMap<&str, Vec<u32>> = HashMap::new();
+        for (i, trip) in feed.trips.iter().enumerate() {
+            if !trip.block_id.is_empty() {
+                blocks
+                    .entry(trip.block_id.as_str())
+                    .or_default()
+                    .push(i as u32);
+            }
         }
-        let dep = |t: u32| feed.trip_stop_times(t)[0].departure;
-        let mut same: Vec<u32> = (0..feed.trips.len() as u32)
-            .filter(|&t| feed.trips[t as usize].block_id == *block && running(t))
-            .collect();
-        same.sort_by_key(|&t| (dep(t), t));
-        let k = same.iter().position(|&t| t == a)?;
-        let next = *same.get(k + 1)?;
-        let vetoed = feed
-            .transfers
-            .iter()
-            .any(|t| t.transfer_type == 5 && t.from_trip == Some(a) && t.to_trip == Some(next));
-        (dep(next) != dep(a) && !vetoed).then_some(next)
-    };
-    let joins = |a: u32, z: u32| {
-        let (ra, rz) = (feed.trip_stop_times(a), feed.trip_stop_times(z));
-        let (Some(last), Some(first)) = (ra.last(), rz.first()) else {
-            return false;
+        InSeat {
+            ctx,
+            linked,
+            vetoed,
+            blocks,
+            by_date: HashMap::new(),
+        }
+    }
+
+    /// Whether the vehicle of trip `a` runs trip `z` next on `sd`.
+    fn continues(&mut self, a: u32, z: u32, sd: NaiveDate) -> bool {
+        if !self.by_date.contains_key(&sd) {
+            let next = self.next_trips(sd);
+            self.by_date.insert(sd, next);
+        }
+        self.by_date[&sd].get(&a) == Some(&z)
+    }
+
+    fn next_trips(&self, sd: NaiveDate) -> HashMap<u32, u32> {
+        let (ctx, feed) = (self.ctx, self.ctx.feed);
+        let running = |t: u32| {
+            let trip = &feed.trips[t as usize];
+            !trip.frequency_template
+                && !feed.trip_stop_times(t).is_empty()
+                && ctx.calendar.is_active(trip.service, sd)
         };
+        let dep = |t: u32| feed.trip_stop_times(t)[0].departure;
+        let mut block_next: HashMap<u32, u32> = HashMap::new();
+        for trips in self.blocks.values() {
+            let mut same: Vec<u32> = trips.iter().copied().filter(|&t| running(t)).collect();
+            same.sort_by_key(|&t| (dep(t), t));
+            for w in same.windows(2) {
+                if dep(w[0]) != dep(w[1]) {
+                    block_next.insert(w[0], w[1]);
+                }
+            }
+        }
         let kind = |t: u32| {
             in_any(
                 feed.routes[feed.trips[t as usize].route as usize].route_type,
                 ctx.visit_types,
             )
         };
-        a != z
-            && ctx.clustering.station_of_stop[last.stop as usize]
+        let joins = |a: u32, z: u32| {
+            let (ra, rz) = (feed.trip_stop_times(a), feed.trip_stop_times(z));
+            if ra.len() < 2 || rz.len() < 2 || a == z {
+                return false;
+            }
+            let (last, first) = (ra[ra.len() - 1], rz[0]);
+            ctx.clustering.station_of_stop[last.stop as usize]
                 == ctx.clustering.station_of_stop[first.stop as usize]
-            && first.arrival >= last.departure
-            && kind(a) == kind(z)
-    };
-    if !(running(a) && running(z) && next_of(a) == Some(z) && joins(a, z)) {
-        return false;
+                && first.arrival >= last.departure
+                && kind(a) == kind(z)
+        };
+        let mut next: HashMap<u32, u32> = HashMap::new();
+        let mut preds: HashMap<u32, usize> = HashMap::new();
+        for a in (0..feed.trips.len() as u32).filter(|&t| running(t)) {
+            let mut to: Vec<u32> = self
+                .linked
+                .get(&a)
+                .map(|to| to.iter().copied().filter(|&t| running(t)).collect())
+                .unwrap_or_default();
+            to.sort_unstable();
+            to.dedup();
+            let candidate = match to.as_slice() {
+                // No linked trip runs: the block decides, unless vetoed.
+                [] => block_next
+                    .get(&a)
+                    .copied()
+                    .filter(|&z| !self.vetoed.contains(&(a, z))),
+                [z] => Some(*z),
+                _ => None,
+            };
+            if let Some(z) = candidate
+                && joins(a, z)
+            {
+                next.insert(a, z);
+                *preds.entry(z).or_default() += 1;
+            }
+        }
+        next.retain(|_, z| preds[z] == 1);
+        next
     }
-    // No other trip may continue as `z` too.
-    (0..feed.trips.len() as u32)
-        .filter(|&y| y != a && running(y) && next_of(y) == Some(z) && joins(y, z))
-        .count()
-        == 0
 }
 
 pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
@@ -484,6 +537,7 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
         ctx.clustering.stations[s as usize].id.clone()
     };
     let transfers = Transfers::new(feed);
+    let mut in_seat = InSeat::new(ctx);
 
     // First visit time of each station, absolute.
     let mut visited: HashMap<String, i64> = HashMap::new();
@@ -707,8 +761,8 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                             && p.clock == origin + i64::from(last.arrival))
                         .then_some(*prev)
                     });
-                    let ok =
-                        bi == 0 && from_terminus.is_some_and(|prev| continues(ctx, prev, ti, sd));
+                    let ok = bi == 0
+                        && from_terminus.is_some_and(|prev| in_seat.continues(prev, ti, sd));
                     if !ok {
                         push(
                             "NOT_A_CONTINUATION",
