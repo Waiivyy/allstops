@@ -210,6 +210,25 @@ stays available: an itinerary records the full feed's SHA-256, so it can
 always be verified against the original zip with
 `allstops verify <zip> <itinerary> --rules <rules>`.
 
+## Itinerary format
+
+Every route is written as a versioned JSON itinerary
+(`allstops-itinerary/0`), specified by a JSON Schema in
+`docs/schema/itinerary-0.schema.json`. It names trips and stops by their
+GTFS IDs and service dates, so it can be checked against the raw feed by the
+verifier, which reads it with its own types and shares no code with the
+planner. Ride times are GTFS times of the ride's own service date, exactly
+as in stop_times.txt; walk, wait and summary times count from the plan
+date's service day. Both may pass 24:00:00. The embedded rules make a run
+reproducible.
+
+Tests validate planner output against the schema on 200 synthetic networks
+and on a ride that stays aboard through a terminus, and check that the
+schema rejects broken documents; the Munich itinerary for 2026-11-12 also
+validates. Optional fields may be added within version 0 when older readers
+can ignore them (`stay_aboard` was added this way, written only when true);
+anything else needs version 1.
+
 ## Lower bound
 
 Two bounds, both from relaxing the visiting order to a Hamiltonian path over
