@@ -38,7 +38,8 @@ the stations on the route. Walk links are straight-line approximations unless
 a walks file replaces them with measured times.
 
 Rules are checked before any work starts, and every problem is reported at
-once: the date must be `YYYY-MM-DD`, the window must end after it starts and
+once: the date must be `YYYY-MM-DD`, clock times `H:MM` or `HH:MM` with
+optional `:SS`, the window must end after it starts and
 last at most 48 hours, walking speed must be above 0 and at most 30 km/h, the
 detour factor between 1 and 5, `max_walk_m` between 0 and 10,000, transfer
 minimums between 1 second and one day, and connector modes must be known.

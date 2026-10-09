@@ -174,20 +174,25 @@ impl Rules {
     }
 }
 
-/// Parse `HH:MM` or `HH:MM:SS`; hours may exceed 23.
+/// A rules clock time, `H:MM` or `HH:MM` with optional `:SS`, hours up to
+/// 99 (times of the plan date's service day may pass 24:00). Nothing else is
+/// accepted, so every rules file the planner reads matches the itinerary
+/// schema.
 pub fn parse_clock(s: &str) -> Option<i32> {
-    let mut it = s.trim().split(':');
-    let h: i32 = it.next()?.parse().ok()?;
-    let m: i32 = it.next()?.parse().ok()?;
-    let sec: i32 = match it.next() {
-        Some(x) => x.parse().ok()?,
-        None => 0,
+    let digits = |p: &str, len: std::ops::RangeInclusive<usize>| -> Option<i32> {
+        if len.contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()) {
+            p.parse().ok()
+        } else {
+            None
+        }
     };
-    if it.next().is_some()
-        || !(0..=99).contains(&h)
-        || !(0..60).contains(&m)
-        || !(0..60).contains(&sec)
-    {
+    let parts: Vec<&str> = s.split(':').collect();
+    let (h, m, sec) = match parts.as_slice() {
+        [h, m] => (digits(h, 1..=2)?, digits(m, 2..=2)?, 0),
+        [h, m, sec] => (digits(h, 1..=2)?, digits(m, 2..=2)?, digits(sec, 2..=2)?),
+        _ => return None,
+    };
+    if m > 59 || sec > 59 {
         return None;
     }
     Some(h * 3600 + m * 60 + sec)
@@ -217,9 +222,22 @@ mod tests {
         assert_eq!(parse_clock("04:30"), Some(4 * 3600 + 1800));
         assert_eq!(parse_clock("26:00"), Some(26 * 3600));
         assert_eq!(parse_clock("05:00:30"), Some(5 * 3600 + 30));
+        assert_eq!(parse_clock("6:00"), Some(6 * 3600));
         assert_eq!(parse_clock("4:61"), None);
         assert_eq!(parse_clock("x"), None);
         assert_eq!(parse_clock("-1:00"), None);
+        // One grammar, the one the itinerary schema publishes.
+        for loose in [
+            "+6:00",
+            "6:5",
+            " 06:00",
+            "06:00 ",
+            "6:00:5",
+            "100:00",
+            "06:00:00:00",
+        ] {
+            assert_eq!(parse_clock(loose), None, "{loose:?}");
+        }
     }
 
     #[test]

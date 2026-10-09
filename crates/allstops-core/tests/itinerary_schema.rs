@@ -125,3 +125,26 @@ fn the_schema_rejects_broken_documents() {
         assert!(!v.is_valid(&doc), "{what} should be rejected");
     }
 }
+
+#[test]
+fn every_clock_the_rules_accept_validates() {
+    let v = validator();
+    let net = random::network(3, 7);
+    let mut csa = Csa::new(&net);
+    let plan = net
+        .targets
+        .iter()
+        .find_map(|&s| greedy(&mut csa, s, net.window_start))
+        .expect("a plan");
+    for (start, end) in [("6:00", "26:00"), ("06:00:30", "9:59:59")] {
+        let rules = Rules {
+            earliest_start: start.into(),
+            latest_end: end.into(),
+            ..Rules::default()
+        };
+        assert_eq!(rules.validate(), Ok(()));
+        let it = to_itinerary(&net, &plan, &rules, feed(), "Europe/Berlin").unwrap();
+        let doc = serde_json::to_value(&it).unwrap();
+        assert_eq!(errors(&v, &doc), Vec::<String>::new(), "{start} {end}");
+    }
+}
