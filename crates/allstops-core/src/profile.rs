@@ -3,13 +3,18 @@
 //! the connections (after the profile variant of the Connection Scan
 //! Algorithm, Dibbelt et al., ACM JEA 23, 2018, section 4).
 //!
-//! Used for the timetable-aware lower bound: [`min_visit_gaps`] gives, for
-//! every ordered pair of targets (i, j), the least time from any moment at
-//! which `i` is visited (aboard a train stopping there, or boarding one) to
-//! the earliest visit of `j` reachable from that moment. Waiting and change
-//! times are included; only the order of visits is relaxed.
+//! [`ProfileTo`] answers profile queries: the earliest visit of one
+//! destination as a function of the time a runner is ready at any station,
+//! over the whole time window, so "what if I leave six minutes later" costs a
+//! lookup instead of a scan.
+//!
+//! The timetable-aware lower bound uses the same scan: [`min_visit_gaps`]
+//! gives, for every ordered pair of targets (i, j), the least time from any
+//! moment at which `i` is visited (aboard a train stopping there, or boarding
+//! one) to the earliest visit of `j` reachable from that moment. Waiting and
+//! change times are included; only the order of visits is relaxed.
 
-use crate::network::{INF, Network, StationIdx, Time, flag};
+use crate::network::{ConnIdx, INF, Network, StationIdx, Time, flag};
 
 /// Earliest visit of a destination when ready to board at a station from a
 /// given time on: a staircase of `(departure, visit)` pairs, both strictly
@@ -32,6 +37,81 @@ impl Staircase {
             Some(last) if last.0 == dep => last.1 = visit,
             _ => self.0.push((dep, visit)),
         }
+    }
+}
+
+/// Earliest visits of one destination from every station and every time:
+/// the result of one backward scan.
+pub struct ProfileTo {
+    dest: StationIdx,
+    /// Per station: boarding a train there at or after a time.
+    ready: Vec<Staircase>,
+    /// Per connection: aboard its trip at its arrival.
+    aboard_arr: Vec<Time>,
+}
+
+impl ProfileTo {
+    /// Scan the network backwards once towards `dest`.
+    pub fn new(net: &Network, dest: StationIdx) -> Self {
+        let mut ready = vec![Staircase::default(); net.stations.len()];
+        let mut trip_best = vec![INF; net.trips.len()];
+        let aboard_arr = scan_to(net, dest, &mut ready, &mut trip_best);
+        ProfileTo {
+            dest,
+            ready,
+            aboard_arr,
+        }
+    }
+
+    pub fn dest(&self) -> StationIdx {
+        self.dest
+    }
+
+    /// Earliest visit of the destination for a runner standing at
+    /// `station` from time `t`, free to board there or to walk once and
+    /// board where the walk ends: the same as a forward scan from
+    /// [`crate::csa::Origin::At`]. `INF` when the destination cannot be
+    /// visited inside the window.
+    pub fn earliest_visit(&self, net: &Network, station: StationIdx, t: Time) -> Time {
+        let mut best = self.ready[station as usize].query(t);
+        for f in net.footpaths_from(station) {
+            best = best.min(self.ready[f.to as usize].query(t + f.duration));
+        }
+        best
+    }
+
+    /// Earliest visit of the destination for a runner aboard the trip of
+    /// connection `conn` as it arrives (who may stay aboard, or alight if
+    /// drop-off is allowed).
+    pub fn earliest_visit_aboard(&self, conn: ConnIdx) -> Time {
+        self.aboard_arr[conn as usize]
+    }
+
+    /// The whole profile at `station`: the pairs (latest time to be ready
+    /// at `station`, earliest visit of the destination), with both
+    /// strictly increasing. Ready at `t`, the earliest visit is that of the
+    /// first pair whose time is at least `t`.
+    pub fn pairs(&self, net: &Network, station: StationIdx) -> Vec<(Time, Time)> {
+        let mut all: Vec<(Time, Time)> = self.ready[station as usize].0.clone();
+        for f in net.footpaths_from(station) {
+            all.extend(
+                self.ready[f.to as usize]
+                    .0
+                    .iter()
+                    .map(|&(dep, v)| (dep - f.duration, v)),
+            );
+        }
+        // Latest ready time first; keep a pair only if it visits earlier
+        // than every pair with a later ready time.
+        all.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut out: Vec<(Time, Time)> = Vec::with_capacity(all.len());
+        for (r, v) in all {
+            if out.last().is_none_or(|&(_, lv)| v < lv) {
+                out.push((r, v));
+            }
+        }
+        out.reverse();
+        out
     }
 }
 

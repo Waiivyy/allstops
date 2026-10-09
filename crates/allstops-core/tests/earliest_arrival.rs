@@ -5,9 +5,10 @@
 use allstops_core::builder::test_support::{call, trip, with_stations};
 use allstops_core::builder::{Call, NetworkBuilder};
 use allstops_core::csa::{Csa, End, JLeg, Origin};
-use allstops_core::network::{INF, Network};
+use allstops_core::network::{INF, Network, Time, flag};
 use allstops_core::oracle::earliest_visits;
 use allstops_core::plan::visits;
+use allstops_core::profile::ProfileTo;
 use proptest::prelude::*;
 
 fn line(b: &mut NetworkBuilder, name: &str, stops: &[(u32, i32)], visits: bool) {
@@ -304,22 +305,129 @@ proptest! {
             let at_origin = o.place(&net).0 == s;
             let found = v.iter().any(|&(vs, vt)| vs == s && vt == got[s as usize]);
             prop_assert!(found || (at_origin && j.legs.is_empty()), "station {} label {} legs {:?}", s, got[s as usize], j.legs);
-            let mut clock = o.place(&net).1;
-            for leg in &j.legs {
-                match *leg {
-                    JLeg::Walk { start, end, .. } => {
-                        prop_assert!(start >= clock && end > start);
-                        clock = end;
-                    }
-                    JLeg::Ride { trip, from_pos, to_pos, .. } => {
-                        let cs = net.trip_connections(trip);
-                        let first = &net.connections[cs[from_pos as usize] as usize];
-                        let last = &net.connections[cs[to_pos as usize] as usize];
-                        prop_assert!(first.dep >= clock);
-                        clock = last.arr;
-                    }
+            if let Err(e) = check_journey(&net, o, &j.legs, j.end) {
+                prop_assert!(false, "station {}: {} in {:?}", s, e, j.legs);
+            }
+        }
+    }
+
+    /// Profile queries: one backward scan per destination answers "earliest
+    /// visit if ready at this station at time t" for every station and time,
+    /// exactly as a forward scan from there would.
+    #[test]
+    fn profiles_match_repeated_queries(spec in spec(), times in proptest::collection::vec(-100i32..3000, 4)) {
+        let net = build(&spec);
+        let mut csa = Csa::new(&net);
+        for dest in 0..net.stations.len() as u32 {
+            let p = ProfileTo::new(&net, dest);
+            for s in 0..net.stations.len() as u32 {
+                let pairs = p.pairs(&net, s);
+                prop_assert!(pairs.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 < w[1].1), "{:?}", pairs);
+                for &t in &times {
+                    let want = csa.run(Origin::At { station: s, time: t }, None).visit[dest as usize];
+                    prop_assert_eq!(p.earliest_visit(&net, s, t), want, "from {} at {} to {}", s, t, dest);
+                    let from_pairs = pairs.iter().find(|&&(r, _)| r >= t).map_or(INF, |&(_, v)| v);
+                    prop_assert_eq!(from_pairs, want);
                 }
             }
         }
     }
+}
+
+/// The journey rules, checked independently of the scan: every ride
+/// boards where pickup is allowed and alights where drop-off is allowed;
+/// every departure is no earlier than the previous arrival plus the
+/// station's change time, or the end of a walk (whose duration already
+/// includes the walk-link minimum); walks follow a footpath at its duration,
+/// start no earlier than the arrival, and never follow a walk or a boarding
+/// origin. A journey that ends aboard has not alighted from its last ride;
+/// one that ends boarding must be able to board there.
+fn check_journey(net: &Network, o: Origin, legs: &[JLeg], end: End) -> Result<(), String> {
+    let (station, time) = o.place(net);
+    // Where the runner is, when they got there, the earliest departure they
+    // can catch there, and whether a walk is allowed next.
+    let mut at = station;
+    let mut arrived: Time = time;
+    let mut ready: Time = match o {
+        Origin::Aboard { .. } => time + net.change_time[station as usize],
+        _ => time,
+    };
+    let mut may_walk = !matches!(o, Origin::Boarding { .. });
+    for (i, leg) in legs.iter().enumerate() {
+        match *leg {
+            JLeg::Walk {
+                from,
+                to,
+                start,
+                end,
+                ..
+            } => {
+                if !may_walk {
+                    return Err("a walk after a walk or from a boarding origin".into());
+                }
+                if from != at || start < arrived {
+                    return Err(format!(
+                        "walk from {from} at {start}, runner at {at} since {arrived}"
+                    ));
+                }
+                let f = net
+                    .footpaths_from(from)
+                    .iter()
+                    .find(|f| f.to == to)
+                    .ok_or_else(|| format!("no footpath {from} to {to}"))?;
+                if end - start != f.duration {
+                    return Err(format!(
+                        "walk {from} to {to} takes {} not {}",
+                        end - start,
+                        f.duration
+                    ));
+                }
+                (at, arrived, ready, may_walk) = (to, end, end, false);
+            }
+            JLeg::Ride {
+                trip,
+                from_pos,
+                to_pos,
+                continues_origin,
+            } => {
+                let cs = net.trip_connections(trip);
+                let board = &net.connections[cs[from_pos as usize] as usize];
+                let alight = &net.connections[cs[to_pos as usize] as usize];
+                if board.dep_station != at {
+                    return Err(format!("ride from {}, runner at {at}", board.dep_station));
+                }
+                if !(i == 0 && continues_origin) {
+                    if !board.has(flag::PICKUP) {
+                        return Err("boards where pickup is not allowed".into());
+                    }
+                    if board.dep < ready {
+                        return Err(format!(
+                            "departs {} before the runner can board at {ready}",
+                            board.dep
+                        ));
+                    }
+                }
+                let stays_aboard = i + 1 == legs.len() && matches!(end, End::Aboard { .. });
+                if !stays_aboard && !alight.has(flag::DROP_OFF) {
+                    return Err("alights where drop-off is not allowed".into());
+                }
+                let a = alight.arr_station;
+                (at, arrived, ready, may_walk) = (
+                    a,
+                    alight.arr,
+                    alight.arr + net.change_time[a as usize],
+                    true,
+                );
+            }
+        }
+    }
+    if let End::Boarding { trip, pos, .. } = end
+        && !legs.is_empty()
+    {
+        let c = &net.connections[net.trip_connections(trip)[pos as usize] as usize];
+        if c.dep_station != at || !c.has(flag::PICKUP) || c.dep < ready {
+            return Err(format!("cannot board at the end: at {at}, ready {ready}"));
+        }
+    }
+    Ok(())
 }
