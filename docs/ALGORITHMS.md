@@ -26,7 +26,12 @@ from a network pack, which holds the same tables (`allstops-gtfs/src/network.rs`
   link's estimated time with a measured one or remove the link.
 
 Only trips of the target mode and of the allowed connector modes enter the
-network, and only those that overlap the time window.
+network, and only those that overlap the time window. When the rules let
+runners stay aboard through a terminus, a trip and the trip its vehicle runs
+next (`docs/RULES.md`) become one network trip, joined by a hop that allows
+neither boarding nor alighting; every algorithm below then handles staying
+aboard without knowing about it, and the itinerary splits such a ride back
+into its GTFS trips.
 
 ## Earliest arrival and earliest visit: Connection Scan
 

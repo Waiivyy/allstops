@@ -30,7 +30,7 @@ keeper's own guidelines for an attempt win over this page.
 | `min_transfer_s.walk_link` | `120` | **Assumption.** A walk between two stations never takes less than this. At least 1 second. |
 | `tight_transfer_s` | `120` | `allstops solve` flags every change with less time than this to spare beyond its minimum. |
 | `count_pass_through` | `false` | Whether a scheduled pass-through (pickup and drop-off both forbidden) counts as a visit. |
-| `stay_aboard_through_terminus` | `false` | Riding through a terminus when the train continues as a new trip (`block_id`). Not supported yet; must be `false`. |
+| `stay_aboard_through_terminus` | `false` | Staying aboard at a terminus when the same vehicle continues as another trip. Off by default: whether runners may do this, and whether operators let them, is open. See below. |
 
 The defaults are deliberately conservative. They are planning assumptions, not
 measurements, and a real runner should check them against their own pace and
@@ -109,6 +109,31 @@ later one applies. The verifier reads the same file and rejects a forbidden
 walk (`WALK_FORBIDDEN`) or one faster than the measured time. An itinerary
 planned with either file can only be verified with `--rules`, because the
 files are named relative to the rules file.
+
+## Staying aboard through a terminus
+
+With `stay_aboard_through_terminus = true`, a runner may stay on the vehicle
+at the last stop of a trip when the same vehicle continues as another trip,
+instead of getting off and boarding again. Which trip a vehicle runs next
+comes from the feed, as the GTFS reference defines it:
+
+- a transfers.txt row with `transfer_type = 4` (in-seat transfer allowed)
+  from the trip names the next trip; such rows win over blocks;
+- otherwise the next trip of the same block: the same `block_id`, running on
+  the same service date, ordered by first departure; a `transfer_type = 5`
+  row (in-seat transfer not allowed) between the two forbids it.
+
+Only one-to-one continuations count (no vehicles splitting or joining), the
+next trip must start at the station where the previous one ends and depart
+no earlier than it arrives, and both trips must be of the same kind
+(counting as visits or not). No change time applies, and pickup and
+drop-off restrictions at the terminus do not matter, since nobody gets off.
+Both stops count as visits as usual. In an itinerary the second trip is a
+ride leg with `"stay_aboard": true`; the verifier checks the continuation
+from the raw rows on its own.
+
+The MVV feed has no `block_id` and no transfers.txt, so this rule changes
+nothing in Munich.
 
 ## What counts as a visit
 

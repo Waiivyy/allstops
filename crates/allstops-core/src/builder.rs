@@ -196,6 +196,7 @@ pub mod test_support {
             visits,
             conns_start: 0,
             conns_end: 0,
+            continues_as: Vec::new(),
         }
     }
 

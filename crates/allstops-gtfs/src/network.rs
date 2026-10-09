@@ -98,11 +98,6 @@ pub fn build_network(
     let date = NaiveDate::parse_from_str(&rules.date, "%Y-%m-%d")
         .map_err(|_| bad(format!("bad date {:?}", rules.date)))?;
     check_plan_date(feed, cal, date)?;
-    if rules.stay_aboard_through_terminus {
-        return Err(bad(
-            "stay_aboard_through_terminus is not supported yet".into()
-        ));
-    }
     if rules.end != "any" {
         return Err(bad(format!(
             "end = {:?}: a fixed end station is not supported yet; use \"any\"",
@@ -175,6 +170,12 @@ pub fn build_network(
     let mut trips_added = 0;
     let mut skipped_backwards = 0;
     let mut skipped_too_long = 0;
+    let visits_of = |t: u32| {
+        in_ranges(
+            feed.routes[feed.trips[t as usize].route as usize].route_type,
+            visit_types,
+        )
+    };
     for delta in k_lo..=k_hi {
         let day = date + chrono::Duration::days(delta);
         let Some(offset) = day_offset(&tz, date, day) else {
@@ -188,13 +189,14 @@ pub fn build_network(
             continue;
         };
         let day_str = day.format("%Y-%m-%d").to_string();
+        // Trips that run in the window on this service day.
+        let mut runs: Vec<u32> = Vec::new();
         for (ti, trip) in feed.trips.iter().enumerate() {
             if trip.frequency_template {
                 continue;
             }
             let route = &feed.routes[trip.route as usize];
-            let visits = in_ranges(route.route_type, visit_types);
-            if !visits && !in_ranges(route.route_type, &connector) {
+            if !visits_of(ti as u32) && !in_ranges(route.route_type, &connector) {
                 continue;
             }
             let st = feed.trip_stop_times(ti as u32);
@@ -215,44 +217,89 @@ pub fn build_network(
                 skipped_too_long += 1;
                 continue;
             }
-            let mut calls = Vec::with_capacity(st.len());
-            for s in st {
-                let cs = clustering.station_of_stop[s.stop as usize];
-                let station = add_station(&mut b, cs);
-                let stop = *stop_map.entry(s.stop).or_insert_with(|| {
-                    let fs = &feed.stops[s.stop as usize];
-                    b.add_stop(net::Stop {
-                        id: fs.id.clone(),
-                        station,
-                        platform: fs.platform_code.clone(),
-                    })
-                });
-                calls.push(Call {
-                    stop,
-                    station,
-                    arr: s.arrival + offset,
-                    dep: s.departure + offset,
-                    pickup: s.pickup_allowed(),
-                    drop_off: s.drop_off_allowed(),
-                    counts: !s.is_pass_through() || rules.count_pass_through,
-                });
-            }
-            let name = if route.short_name.is_empty() {
-                route.long_name.clone()
-            } else {
-                route.short_name.clone()
+            runs.push(ti as u32);
+        }
+        let chains: Vec<Vec<u32>> = if rules.stay_aboard_through_terminus {
+            // Which trip a vehicle runs next depends on every trip it runs
+            // that day, inside the window or not.
+            let active: Vec<u32> = (0..feed.trips.len() as u32)
+                .filter(|&t| {
+                    let trip = &feed.trips[t as usize];
+                    !trip.frequency_template
+                        && !feed.trip_stop_times(t).is_empty()
+                        && cal.is_active(trip.service, day)
+                })
+                .collect();
+            continuation_chains(feed, clustering, &active, &runs, &visits_of)
+        } else {
+            runs.iter().map(|&t| vec![t]).collect()
+        };
+        for chain in chains {
+            let head = &feed.trips[chain[0] as usize];
+            let route_name = |t: &crate::feed::Trip| {
+                let r = &feed.routes[t.route as usize];
+                if r.short_name.is_empty() {
+                    r.long_name.clone()
+                } else {
+                    r.short_name.clone()
+                }
             };
+            let mut calls: Vec<Call> = Vec::new();
+            let mut parts: Vec<net::TripPart> = Vec::new();
+            for (k, &ti) in chain.iter().enumerate() {
+                let trip = &feed.trips[ti as usize];
+                if k > 0 {
+                    // The hop joining the two trips at the terminus: no
+                    // boarding at the earlier trip's last stop and no
+                    // alighting at the later trip's first stop.
+                    if let Some(last) = calls.last_mut() {
+                        last.pickup = false;
+                    }
+                    parts.push(net::TripPart {
+                        gtfs_id: trip.id.clone(),
+                        route: route_name(trip),
+                        headsign: trip.headsign.clone(),
+                        route_type: feed.routes[trip.route as usize].route_type,
+                        first_hop: calls.len() as u16,
+                    });
+                }
+                for (j, s) in feed.trip_stop_times(ti).iter().enumerate() {
+                    let cs = clustering.station_of_stop[s.stop as usize];
+                    let station = add_station(&mut b, cs);
+                    let stop = *stop_map.entry(s.stop).or_insert_with(|| {
+                        let fs = &feed.stops[s.stop as usize];
+                        b.add_stop(net::Stop {
+                            id: fs.id.clone(),
+                            station,
+                            platform: fs.platform_code.clone(),
+                        })
+                    });
+                    // A runner staying aboard is at a later trip's first
+                    // stop from its departure, the time the verifier counts.
+                    let joined = k > 0 && j == 0;
+                    calls.push(Call {
+                        stop,
+                        station,
+                        arr: if joined { s.departure } else { s.arrival } + offset,
+                        dep: s.departure + offset,
+                        pickup: s.pickup_allowed(),
+                        drop_off: s.drop_off_allowed() && !joined,
+                        counts: !s.is_pass_through() || rules.count_pass_through,
+                    });
+                }
+            }
             let added = b.add_trip(
                 net::Trip {
-                    gtfs_id: trip.id.clone(),
+                    gtfs_id: head.id.clone(),
                     service_date: day_str.clone(),
                     offset,
-                    route: name,
-                    headsign: trip.headsign.clone(),
-                    route_type: route.route_type,
-                    visits,
+                    route: route_name(head),
+                    headsign: head.headsign.clone(),
+                    route_type: feed.routes[head.route as usize].route_type,
+                    visits: visits_of(chain[0]),
                     conns_start: 0,
                     conns_end: 0,
+                    continues_as: parts,
                 },
                 &calls,
             );
@@ -341,6 +388,117 @@ pub fn build_network(
         walk_overrides_unused,
     };
     Ok((network, report))
+}
+
+/// Trips of one service day grouped into the sequences one vehicle runs
+/// without passengers having to leave: `runs` in their order, each trip
+/// followed by the trip it continues as, decided over all `active` trips of
+/// the day (the verifier decides the same way). A trip continues as another when
+/// a transfers.txt linked-trips row (`transfer_type = 4`) says so, or else
+/// when it is followed in its block (same `block_id`, ordered by first
+/// departure) and no `transfer_type = 5` row forbids it (the GTFS reference
+/// lets linked-trips rows win over blocks). Only one-to-one continuations
+/// join, and only when the next trip starts at the station where the
+/// previous one ends, no earlier than it arrives there, and both are of the
+/// same kind (target mode or connector).
+fn continuation_chains(
+    feed: &Feed,
+    clustering: &Clustering,
+    active: &[u32],
+    runs: &[u32],
+    visits_of: &dyn Fn(u32) -> bool,
+) -> Vec<Vec<u32>> {
+    use std::collections::{BTreeMap, HashSet};
+    let running: HashSet<u32> = active.iter().copied().collect();
+    let in_network: HashSet<u32> = runs.iter().copied().collect();
+    let mut linked: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut vetoed: HashSet<(u32, u32)> = HashSet::new();
+    for t in &feed.transfers {
+        match (t.transfer_type, t.from_trip, t.to_trip) {
+            (4, Some(a), Some(z)) if running.contains(&a) && running.contains(&z) => {
+                linked.entry(a).or_default().push(z);
+            }
+            (5, Some(a), Some(z)) => {
+                vetoed.insert((a, z));
+            }
+            _ => {}
+        }
+    }
+    let first_dep = |t: u32| feed.trip_stop_times(t)[0].departure;
+    let mut blocks: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
+    for &t in active {
+        let id = feed.trips[t as usize].block_id.as_str();
+        if !id.is_empty() {
+            blocks.entry(id).or_default().push(t);
+        }
+    }
+    let mut block_next: HashMap<u32, u32> = HashMap::new();
+    for trips in blocks.values_mut() {
+        trips.sort_by_key(|&t| (first_dep(t), t));
+        for w in trips.windows(2) {
+            // Two trips of one vehicle cannot leave at the same time.
+            if first_dep(w[0]) != first_dep(w[1]) {
+                block_next.insert(w[0], w[1]);
+            }
+        }
+    }
+    let joins = |a: u32, z: u32| {
+        let (sa, sz) = (feed.trip_stop_times(a), feed.trip_stop_times(z));
+        let (last, first) = (sa[sa.len() - 1], sz[0]);
+        a != z
+            && clustering.station_of_stop[last.stop as usize]
+                == clustering.station_of_stop[first.stop as usize]
+            && first.arrival >= last.departure
+            && visits_of(a) == visits_of(z)
+    };
+    let mut next: HashMap<u32, u32> = HashMap::new();
+    let mut preds: HashMap<u32, usize> = HashMap::new();
+    for &a in active {
+        let candidate = match linked.get(&a) {
+            Some(to) if to.len() == 1 => Some(to[0]),
+            Some(_) => None,
+            None => block_next
+                .get(&a)
+                .copied()
+                .filter(|&z| !vetoed.contains(&(a, z))),
+        };
+        if let Some(z) = candidate
+            && joins(a, z)
+        {
+            next.insert(a, z);
+            *preds.entry(z).or_default() += 1;
+        }
+    }
+    // One to one only, and both trips must be in the network.
+    next.retain(|a, z| preds[z] == 1 && in_network.contains(a) && in_network.contains(z));
+    let continued: HashSet<u32> = next.values().copied().collect();
+    let mut placed: HashSet<u32> = HashSet::new();
+    let mut chains = Vec::new();
+    for &t in runs {
+        if continued.contains(&t) {
+            continue;
+        }
+        let mut chain = vec![t];
+        let mut calls = feed.trip_stop_times(t).len();
+        while let Some(&z) = next.get(chain.last().expect("non-empty")) {
+            calls += feed.trip_stop_times(z).len();
+            if placed.contains(&z) || chain.contains(&z) || calls > MAX_CALLS_PER_TRIP {
+                break;
+            }
+            chain.push(z);
+        }
+        placed.extend(chain.iter().copied());
+        chains.push(chain);
+    }
+    // Trips left out (a cycle of equal times, or a chain cut short) run
+    // alone, in their place.
+    for &t in runs {
+        if !placed.contains(&t) {
+            placed.insert(t);
+            chains.push(vec![t]);
+        }
+    }
+    chains
 }
 
 /// Apply transfers.txt conservatively at station level. A minimum time

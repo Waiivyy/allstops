@@ -44,6 +44,35 @@ pub struct Trip {
     /// Range into [`Network::trip_conns`].
     pub conns_start: u32,
     pub conns_end: u32,
+    /// Later GTFS trips the same vehicle continues as, when the rules let
+    /// runners stay aboard through a terminus; empty otherwise. The fields
+    /// above describe the first part. The hop before a part's `first_hop`
+    /// joins the two trips at the terminus and allows neither boarding nor
+    /// alighting.
+    pub continues_as: Vec<TripPart>,
+}
+
+/// A later GTFS trip within a network trip (see [`Trip::continues_as`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TripPart {
+    pub gtfs_id: String,
+    pub route: String,
+    pub headsign: String,
+    pub route_type: u16,
+    /// The hop leaving this part's first stop.
+    pub first_hop: u16,
+}
+
+impl Trip {
+    /// The GTFS trip that hop `pos` belongs to: 0 for the first part, `k`
+    /// for `continues_as[k - 1]`. The joining hop belongs to the earlier
+    /// trip.
+    pub fn part_of_hop(&self, pos: u16) -> usize {
+        self.continues_as
+            .iter()
+            .take_while(|p| p.first_hop <= pos)
+            .count()
+    }
 }
 
 /// Flags on a connection.

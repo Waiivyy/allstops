@@ -40,6 +40,11 @@ pub enum Leg {
         alight_time: String,
         /// Stations this leg visits, in order.
         stations: Vec<String>,
+        /// The runner stayed aboard from the previous ride: this trip is the
+        /// one the vehicle continues as after the previous trip's terminus,
+        /// and nobody alights or boards in between. Only written when true.
+        #[serde(default, skip_serializing_if = "is_false")]
+        stay_aboard: bool,
     },
     Walk {
         from_station: String,
@@ -79,6 +84,44 @@ pub struct Itinerary {
     pub summary: Summary,
     pub lower_bound_s: Option<i32>,
     pub gap: Option<f64>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// The GTFS trips one network ride covers, as (part, first hop, last hop).
+/// A network trip holds several GTFS trips when the runner may stay aboard
+/// through a terminus; the hop joining two of them is in neither range.
+pub fn ride_parts(net: &Network, trip: u32, from_pos: u16, to_pos: u16) -> Vec<(usize, u16, u16)> {
+    let t = &net.trips[trip as usize];
+    let mut out = Vec::new();
+    let mut p = from_pos;
+    loop {
+        let part = t.part_of_hop(p);
+        match t.continues_as.get(part).map(|next| next.first_hop) {
+            // The ride goes on into the next trip: this part ends at its
+            // last stop, the arrival of the hop before the joining hop.
+            Some(next_first) if to_pos >= next_first => {
+                if p + 2 <= next_first {
+                    out.push((part, p, next_first - 2));
+                }
+                p = next_first;
+            }
+            _ => {
+                // A ride never ends on a joining hop (nobody can alight
+                // there); if it did, it ends at the earlier trip's terminus.
+                let last = match t.continues_as.get(part) {
+                    Some(next) if to_pos + 1 == next.first_hop => to_pos.saturating_sub(1),
+                    _ => to_pos,
+                };
+                if last >= p {
+                    out.push((part, p, last));
+                }
+                return out;
+            }
+        }
+    }
 }
 
 /// Stations a ride visits, in order: the boarding station and every later
@@ -137,25 +180,54 @@ pub fn to_itinerary(
             } => {
                 let t = &net.trips[trip as usize];
                 let cs = net.trip_connections(trip);
-                let a = &net.connections[cs[from_pos as usize] as usize];
-                let b = &net.connections[cs[to_pos as usize] as usize];
-                let stations = ride_stations(net, trip, from_pos, to_pos);
                 rides += 1;
-                (
-                    a.dep,
-                    b.arr,
-                    Leg::Ride {
-                        trip_id: t.gtfs_id.clone(),
-                        service_date: t.service_date.clone(),
-                        route: t.route.clone(),
-                        headsign: t.headsign.clone(),
-                        board_stop_id: net.stops[a.dep_stop as usize].id.clone(),
-                        board_time: clock(a.dep - t.offset),
-                        alight_stop_id: net.stops[b.arr_stop as usize].id.clone(),
-                        alight_time: clock(b.arr - t.offset),
-                        stations,
-                    },
-                )
+                let mut parts = Vec::new();
+                for (k, (part, p, q)) in ride_parts(net, trip, from_pos, to_pos)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let a = &net.connections[cs[p as usize] as usize];
+                    let b = &net.connections[cs[q as usize] as usize];
+                    let (gtfs_id, route, headsign) = match part {
+                        0 => (&t.gtfs_id, &t.route, &t.headsign),
+                        n => {
+                            let x = &t.continues_as[n - 1];
+                            (&x.gtfs_id, &x.route, &x.headsign)
+                        }
+                    };
+                    parts.push((
+                        a.dep,
+                        b.arr,
+                        Leg::Ride {
+                            trip_id: gtfs_id.clone(),
+                            service_date: t.service_date.clone(),
+                            route: route.clone(),
+                            headsign: headsign.clone(),
+                            board_stop_id: net.stops[a.dep_stop as usize].id.clone(),
+                            board_time: clock(a.dep - t.offset),
+                            alight_stop_id: net.stops[b.arr_stop as usize].id.clone(),
+                            alight_time: clock(b.arr - t.offset),
+                            stations: ride_stations(net, trip, p, q),
+                            stay_aboard: k > 0,
+                        },
+                    ));
+                }
+                let Some(last) = parts.pop() else {
+                    continue;
+                };
+                let start = parts.first().map_or(last.0, |p| p.0);
+                if let Some((s, t)) = clock_at
+                    && start > t
+                {
+                    legs.push(Leg::Wait {
+                        station: net.stations[s as usize].id.clone(),
+                        start: clock(t),
+                        end: clock(start),
+                    });
+                }
+                legs.extend(parts.into_iter().map(|p| p.2));
+                clock_at = None;
+                (last.0, last.1, last.2)
             }
             JLeg::Walk {
                 from,
@@ -246,5 +318,104 @@ mod tests {
         let net = b.build();
         assert_eq!(ride_stations(&net, 0, 0, 2), vec!["S0", "S1", "S2", "S0"]);
         assert_eq!(ride_stations(&net, 0, 1, 2), vec!["S1", "S2", "S0"]);
+    }
+
+    #[test]
+    fn a_ride_through_a_terminus_is_written_as_two_trips() {
+        use crate::network::TripPart;
+        let mut b = with_stations(3, 60);
+        let mut t = trip("A", true);
+        t.continues_as.push(TripPart {
+            gtfs_id: "B".into(),
+            route: "U2".into(),
+            headsign: "Three".into(),
+            route_type: 1,
+            first_hop: 2,
+        });
+        let mut a_end = call(1, 100, 100);
+        a_end.pickup = false;
+        let mut b_start = call(1, 160, 160);
+        b_start.drop_off = false;
+        b.add_trip(t, &[call(0, 0, 0), a_end, b_start, call(2, 300, 300)]);
+        for s in 0..3 {
+            b.add_target(s);
+        }
+        let net = b.build();
+        let plan = Plan {
+            legs: vec![JLeg::Ride {
+                trip: 0,
+                from_pos: 0,
+                to_pos: 2,
+                continues_origin: false,
+            }],
+        };
+        let feed = FeedRef {
+            id: "t".into(),
+            sha256: String::new(),
+            feed_version: String::new(),
+            attribution: String::new(),
+        };
+        let it = to_itinerary(&net, &plan, &Rules::default(), feed, "Europe/Berlin").unwrap();
+        type Row<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a str,
+            bool,
+            Vec<String>,
+        );
+        let rides: Vec<Row> = it
+            .legs
+            .iter()
+            .map(|l| match l {
+                Leg::Ride {
+                    trip_id,
+                    board_stop_id,
+                    board_time,
+                    alight_stop_id,
+                    alight_time,
+                    stay_aboard,
+                    stations,
+                    ..
+                } => (
+                    trip_id.as_str(),
+                    board_stop_id.as_str(),
+                    board_time.as_str(),
+                    alight_stop_id.as_str(),
+                    alight_time.as_str(),
+                    *stay_aboard,
+                    stations.clone(),
+                ),
+                other => panic!("unexpected leg {other:?}"),
+            })
+            .collect();
+        let st = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            rides,
+            vec![
+                (
+                    "A",
+                    "S0",
+                    "00:00:00",
+                    "S1",
+                    "00:01:40",
+                    false,
+                    st(&["S0", "S1"])
+                ),
+                (
+                    "B",
+                    "S1",
+                    "00:02:40",
+                    "S2",
+                    "00:05:00",
+                    true,
+                    st(&["S1", "S2"])
+                ),
+            ]
+        );
+        assert_eq!(it.summary.transfers, 0, "staying aboard is not a change");
+        let json = serde_json::to_value(&it.legs[0]).unwrap();
+        assert!(json.get("stay_aboard").is_none(), "only written when true");
     }
 }

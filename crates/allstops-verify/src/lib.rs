@@ -83,6 +83,9 @@ pub enum Leg {
         alight_time: String,
         #[serde(default)]
         stations: Vec<String>,
+        /// Continues the previous ride without leaving the vehicle.
+        #[serde(default)]
+        stay_aboard: bool,
     },
     Walk {
         from_station: String,
@@ -293,6 +296,80 @@ impl<'f> Transfers<'f> {
     }
 }
 
+/// Whether trip `z` is the next trip the vehicle of trip `a` runs on
+/// service date `sd`, so a runner may stay aboard from `a`'s last stop into
+/// `z`. From the GTFS reference: a linked-trips row (`transfer_type = 4`)
+/// from `a` names the next trip; without one, the next trip of `a`'s block
+/// (same `block_id`, running on `sd`, by first departure) is, unless a
+/// `transfer_type = 5` row forbids it. Only one-to-one continuations count,
+/// `z` must start at the station where `a` ends, no earlier than `a`
+/// arrives there, and both must be of the same kind (counting as visits or
+/// not).
+fn continues(ctx: &Context, a: u32, z: u32, sd: NaiveDate) -> bool {
+    let feed = ctx.feed;
+    let running = |t: u32| {
+        let trip = &feed.trips[t as usize];
+        !trip.frequency_template
+            && !feed.trip_stop_times(t).is_empty()
+            && ctx.calendar.is_active(trip.service, sd)
+    };
+    let next_of = |a: u32| -> Option<u32> {
+        let mut linked: Vec<u32> = feed
+            .transfers
+            .iter()
+            .filter(|t| t.transfer_type == 4 && t.from_trip == Some(a))
+            .filter_map(|t| t.to_trip)
+            .filter(|&t| running(t))
+            .collect();
+        linked.sort_unstable();
+        linked.dedup();
+        if !linked.is_empty() {
+            return (linked.len() == 1).then(|| linked[0]);
+        }
+        let block = &feed.trips[a as usize].block_id;
+        if block.is_empty() {
+            return None;
+        }
+        let dep = |t: u32| feed.trip_stop_times(t)[0].departure;
+        let mut same: Vec<u32> = (0..feed.trips.len() as u32)
+            .filter(|&t| feed.trips[t as usize].block_id == *block && running(t))
+            .collect();
+        same.sort_by_key(|&t| (dep(t), t));
+        let k = same.iter().position(|&t| t == a)?;
+        let next = *same.get(k + 1)?;
+        let vetoed = feed
+            .transfers
+            .iter()
+            .any(|t| t.transfer_type == 5 && t.from_trip == Some(a) && t.to_trip == Some(next));
+        (dep(next) != dep(a) && !vetoed).then_some(next)
+    };
+    let joins = |a: u32, z: u32| {
+        let (ra, rz) = (feed.trip_stop_times(a), feed.trip_stop_times(z));
+        let (Some(last), Some(first)) = (ra.last(), rz.first()) else {
+            return false;
+        };
+        let kind = |t: u32| {
+            in_any(
+                feed.routes[feed.trips[t as usize].route as usize].route_type,
+                ctx.visit_types,
+            )
+        };
+        a != z
+            && ctx.clustering.station_of_stop[last.stop as usize]
+                == ctx.clustering.station_of_stop[first.stop as usize]
+            && first.arrival >= last.departure
+            && kind(a) == kind(z)
+    };
+    if !(running(a) && running(z) && next_of(a) == Some(z) && joins(a, z)) {
+        return false;
+    }
+    // No other trip may continue as `z` too.
+    (0..feed.trips.len() as u32)
+        .filter(|&y| y != a && running(y) && next_of(y) == Some(z) && joins(y, z))
+        .count()
+        == 0
+}
+
 pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
     let mut v: Vec<Violation> = Vec::new();
     let mut push = |code: &'static str, leg: Option<usize>, message: String| {
@@ -386,13 +463,6 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
             "minimum transfer times must be at least 1 second".into(),
         );
     }
-    if r.stay_aboard_through_terminus {
-        push(
-            "RULE_UNSUPPORTED",
-            None,
-            "stay_aboard_through_terminus is not supported".into(),
-        );
-    }
     let mut allowed: Vec<RangeInclusive<u16>> = ctx.visit_types.to_vec();
     for m in &r.connector_modes {
         match mode_types(m) {
@@ -436,7 +506,17 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                 alight_stop_id,
                 alight_time,
                 stations,
+                stay_aboard,
             } => {
+                let stay_aboard = *stay_aboard;
+                // The next ride stays aboard: this one does not alight.
+                let next_stays = matches!(
+                    it.legs.get(li + 1),
+                    Some(Leg::Ride {
+                        stay_aboard: true,
+                        ..
+                    })
+                );
                 let Some(&ti) = feed.trip_index.get(trip_id) else {
                     push(
                         "TRIP_UNKNOWN",
@@ -521,14 +601,14 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                     place = None;
                     continue;
                 };
-                if !rows[bi].pickup_allowed() {
+                if !stay_aboard && !rows[bi].pickup_allowed() {
                     push(
                         "PICKUP_NOT_ALLOWED",
                         li_,
                         format!("no pickup at {board_stop_id}"),
                     );
                 }
-                if !rows[ai].drop_off_allowed() {
+                if !next_stays && !rows[ai].drop_off_allowed() {
                     push(
                         "DROP_OFF_NOT_ALLOWED",
                         li_,
@@ -570,10 +650,10 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                             "ride departs before the previous leg ends".into(),
                         );
                     }
-                    let continuing = p
-                        .alight
-                        .as_ref()
-                        .is_some_and(|(_, key, _)| *key == format!("{trip_id}@{service_date}"));
+                    let continuing = stay_aboard
+                        || p.alight
+                            .as_ref()
+                            .is_some_and(|(_, key, _)| *key == format!("{trip_id}@{service_date}"));
                     if let Some((prev_stop, prev_trip, alighted)) = p.last_alight
                         && !continuing
                     {
@@ -604,6 +684,39 @@ pub fn verify(ctx: &Context, it: &Itinerary) -> Report {
                                 format!("{}s to change, {need}s needed", start - alighted),
                             );
                         }
+                    }
+                }
+
+                if stay_aboard {
+                    if !r.stay_aboard_through_terminus {
+                        push(
+                            "STAY_ABOARD_NOT_ALLOWED",
+                            li_,
+                            "the rules do not allow staying aboard through a terminus".into(),
+                        );
+                    }
+                    // The previous ride ended at its trip's last stop on the
+                    // same service date, this one starts at its trip's first
+                    // stop, and the vehicle runs this trip next.
+                    let from_terminus = place.as_ref().and_then(|p| {
+                        let (stop, key, prev) = p.alight.as_ref()?;
+                        let prev_rows = feed.trip_stop_times(*prev);
+                        let last = prev_rows.last()?;
+                        (*stop == last.stop
+                            && key.ends_with(&format!("@{service_date}"))
+                            && p.clock == origin + i64::from(last.arrival))
+                        .then_some(*prev)
+                    });
+                    let ok =
+                        bi == 0 && from_terminus.is_some_and(|prev| continues(ctx, prev, ti, sd));
+                    if !ok {
+                        push(
+                            "NOT_A_CONTINUATION",
+                            li_,
+                            format!(
+                                "trip {trip_id} does not continue the previous ride's trip at its terminus"
+                            ),
+                        );
                     }
                 }
 

@@ -31,6 +31,16 @@ pub struct Trip {
     pub visits: bool,
     pub conns_start: u32,
     pub conns_end: u32,
+    pub continues_as: Vec<TripPart>,
+}
+
+#[derive(Archive, Serialize, Deserialize)]
+pub struct TripPart {
+    pub gtfs_id: String,
+    pub route: String,
+    pub headsign: String,
+    pub route_type: u16,
+    pub first_hop: u16,
 }
 
 #[derive(Archive, Serialize, Deserialize)]
@@ -103,6 +113,17 @@ impl From<&core::Network> for Network {
                     visits: t.visits,
                     conns_start: t.conns_start,
                     conns_end: t.conns_end,
+                    continues_as: t
+                        .continues_as
+                        .iter()
+                        .map(|p| TripPart {
+                            gtfs_id: p.gtfs_id.clone(),
+                            route: p.route.clone(),
+                            headsign: p.headsign.clone(),
+                            route_type: p.route_type,
+                            first_hop: p.first_hop,
+                        })
+                        .collect(),
                 })
                 .collect(),
             connections: n
@@ -174,6 +195,17 @@ impl From<Network> for core::Network {
                     visits: t.visits,
                     conns_start: t.conns_start,
                     conns_end: t.conns_end,
+                    continues_as: t
+                        .continues_as
+                        .into_iter()
+                        .map(|p| core::TripPart {
+                            gtfs_id: p.gtfs_id,
+                            route: p.route,
+                            headsign: p.headsign,
+                            route_type: p.route_type,
+                            first_hop: p.first_hop,
+                        })
+                        .collect(),
                 })
                 .collect(),
             connections: n

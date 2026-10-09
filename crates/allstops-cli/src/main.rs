@@ -7,6 +7,8 @@ mod cmd_stations;
 mod cmd_verify;
 mod plan_input;
 mod registry;
+#[cfg(test)]
+mod stay_aboard_tests;
 mod style;
 
 use std::path::PathBuf;
