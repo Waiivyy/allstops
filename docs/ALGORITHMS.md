@@ -1,7 +1,7 @@
 # Algorithms
 
 This page explains how allstops plans a route, written for a curious engineer.
-It covers what exists after Stage 1; later stages extend it.
+It covers what exists after Stage 2; later stages extend it.
 
 ## The network for one plan
 
@@ -79,14 +79,45 @@ cut a one-to-all scan of the MVV network from 6.99 ms to 1.78 ms on average.
 
 **Correctness check.** `allstops-core/src/oracle.rs` computes the same visit
 labels with a different method: Dijkstra over explicit states (ready at a
-station, just alighted, at the origin, aboard a hop). A property test compares
-the two on random networks with transfer times, walks, pickup and drop-off
-restrictions, non-visiting connector trips, zero-second hops and all three
-origin kinds. The default test run checks 512 networks; a long run with
-`ALLSTOPS_PROPTEST_CASES=100000` also agrees on every one. Deliberately breaking
-the change time or the pickup check makes the test fail. RAPTOR (Delling,
-Pajor, Werneck, 2012) is implemented as a second, independent check of the
-board labels.
+station, just alighted, at the origin, aboard a hop), a time-expanded graph
+searched by brute force. A property test compares the two on random networks
+with transfer times, walks, pickup and drop-off restrictions, non-visiting
+connector trips, zero-second hops and all three origin kinds. For every
+station it also rebuilds the journey and checks it against the journey
+rules with separate code: boarding only where pickup is allowed, alighting
+only where drop-off is allowed, no departure before the previous arrival plus
+the station's change time (or before the end of a walk), walks along a
+footpath at its duration, and never two walks in a row. The default test run
+checks 512 networks; a long run with `ALLSTOPS_PROPTEST_CASES=100000` agrees
+on every one (last run 2026-10-09). Deliberately breaking the change time or
+the pickup check makes the test fail. RAPTOR (Delling, Pajor, Werneck, 2012)
+is implemented as a second, independent check of the board labels.
+
+## Profile queries
+
+The solver needs to ask "if I am ready at station `s` at time `t`, when can I
+first visit `d`?" for many departure times, the "what if I leave six minutes
+later" question. `allstops-core/src/profile.rs` answers it for every `s` and
+`t` at once with one backward scan over the connections towards `d`, after
+the profile variant of Connection Scan in the same paper:
+
+- connections are scanned from the latest to the earliest departure;
+- for each trip, the earliest visit of `d` for a runner aboard it (staying
+  on, or getting off where drop-off is allowed and changing or walking once);
+- for each station, a staircase of (departure, earliest visit) pairs for a
+  runner ready to board there, kept only while each new pair visits `d`
+  strictly earlier.
+
+A lookup takes the staircase at `s` and at every station one walk away
+(shifted by the walk), which is the same movement a forward scan from
+`s` allows. Boarding a train at `d` itself is a visit; walking to `d` is not.
+`ProfileTo::pairs` returns the whole profile at a station as (latest ready
+time, earliest visit) pairs, both strictly increasing.
+
+A property test asks every station and four times per network, for every
+destination, and compares the answer with a forward scan (100,000 random
+networks in the long run). On the full MVV network every one of 6,000
+lookups also equals the forward scan; measurements are in `docs/DESIGN.md`.
 
 ## The first route: nearest unvisited target
 

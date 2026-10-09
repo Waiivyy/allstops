@@ -94,6 +94,22 @@ scan behind the timetable-aware bound. Before an exact pruning of walk
 relaxations (walks start from a station only after its earliest alighting),
 the full scan took 6.99 ms mean.
 
+**Point-to-point and profile queries** (Stage 2), measured the same way on
+2026-10-09 (load average about 5):
+
+| Query | Mean | p50 | p95 | Max |
+|---|---|---|---|---|
+| Connection Scan to one target, with the journey | 0.19 ms | 0.15 ms | 0.47 ms | 0.92 ms |
+| Profile: one backward scan for a destination (20 target stations) | 114 ms | 112 ms | n/a | 122 ms |
+| Profile lookup: earliest visit from a station at a time | 0.11 µs | | | |
+
+A profile holds a mean of 53 (ready time, earliest visit) pairs per station.
+All 6,000 lookups (20 destinations, 300 origins and times each) equal a
+forward scan from the same place and time. A profile pays off once a
+destination is asked about more than about 600 times (114 ms against
+0.19 ms per forward query), which is the solver's situation when it tries
+many departure times between decision stations.
+
 The papers assume transitively closed footpaths; allstops does not need them
 because the rules forbid chained walks (see `docs/ALGORITHMS.md`).
 

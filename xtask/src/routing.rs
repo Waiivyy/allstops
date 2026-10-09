@@ -1,6 +1,8 @@
 //! Routing engine comparison on a full real network: Connection Scan
-//! against RAPTOR for one-to-all earliest-board queries, plus the
-//! early-terminating scan the greedy runs. Single-threaded.
+//! against RAPTOR for one-to-all earliest-board queries, the
+//! early-terminating scan the greedy runs, point-to-point queries with the
+//! journey, and profile queries (one backward scan per destination, then a
+//! lookup per question). Single-threaded.
 
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -9,6 +11,7 @@ use std::time::Instant;
 use allstops_core::builder::random::Lcg;
 use allstops_core::csa::{Csa, Origin};
 use allstops_core::network::{INF, StationIdx, Time};
+use allstops_core::profile::ProfileTo;
 use allstops_core::raptor::Raptor;
 use allstops_core::rules::parse_clock;
 use allstops_gtfs::calendar::ServiceCalendar;
@@ -36,6 +39,9 @@ pub struct Args {
     span_h: i32,
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Destinations (target stations) to build profiles for.
+    #[arg(long, default_value_t = 20)]
+    profile_dests: usize,
     #[arg(long, default_value = "eval/out/routing.json")]
     out: PathBuf,
 }
@@ -98,6 +104,22 @@ struct Output {
     reached_stations_mean: f64,
     agreement: Agreement,
     engines: Vec<Engine>,
+    profiles: Profiles,
+}
+
+#[derive(Serialize)]
+struct Profiles {
+    destinations: usize,
+    /// One backward scan per destination.
+    scan: Latency,
+    /// Lookups per destination: every query origin and time.
+    lookups: usize,
+    lookup_us_mean: f64,
+    /// Lookups whose answer equals a forward scan from the same place and time.
+    identical_to_forward: usize,
+    /// (ready time, visit) pairs per station, mean over stations and
+    /// destinations.
+    pairs_per_station_mean: f64,
 }
 
 /// Nearest-rank percentile of sorted samples.
@@ -201,7 +223,26 @@ pub fn run(a: Args) -> Result<()> {
     }
 
     let stop_at = net.target_mask();
+    // A target station per query, for point-to-point queries.
+    let dests: Vec<StationIdx> = (0..queries.len())
+        .map(|_| net.targets[rng.below(net.targets.len() as u64) as usize])
+        .collect();
+    let mut dest_iter = dests.iter().cycle();
+    let mut only = vec![false; net.stations.len()];
     let engines = vec![
+        time_queries(
+            "CSA, one target, with the journey",
+            "connections scanned",
+            &queries,
+            |station, time| {
+                let d = *dest_iter.next().expect("cycle");
+                only[d as usize] = true;
+                let scanned = csa.run(Origin::At { station, time }, Some(&only)).scanned;
+                black_box(csa.journey_to_visit(d));
+                only[d as usize] = false;
+                scanned
+            },
+        ),
         time_queries(
             "CSA, full scan",
             "connections scanned",
@@ -222,6 +263,44 @@ pub fn run(a: Args) -> Result<()> {
             },
         ),
     ];
+
+    // Profiles: build one per destination, then answer every query from it.
+    let pdests: Vec<StationIdx> = (0..a.profile_dests.min(net.targets.len()))
+        .map(|_| net.targets[rng.below(net.targets.len() as u64) as usize])
+        .collect();
+    let mut scan_ms = Vec::new();
+    let mut lookup_s = 0.0f64;
+    let mut lookups = 0usize;
+    let mut identical_to_forward = 0usize;
+    let mut pairs = 0usize;
+    for &d in &pdests {
+        let t0 = Instant::now();
+        let p = black_box(ProfileTo::new(&net, d));
+        scan_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        let t0 = Instant::now();
+        let answers: Vec<Time> = queries
+            .iter()
+            .map(|&(s, t)| black_box(p.earliest_visit(&net, s, t)))
+            .collect();
+        lookup_s += t0.elapsed().as_secs_f64();
+        lookups += answers.len();
+        for (&(station, time), &got) in queries.iter().zip(&answers) {
+            if csa.run(Origin::At { station, time }, None).visit[d as usize] == got {
+                identical_to_forward += 1;
+            }
+        }
+        pairs += (0..net.stations.len() as u32)
+            .map(|s| p.pairs(&net, s).len())
+            .sum::<usize>();
+    }
+    let profiles = Profiles {
+        destinations: pdests.len(),
+        scan: latency(&scan_ms),
+        lookups,
+        lookup_us_mean: lookup_s * 1e6 / lookups.max(1) as f64,
+        identical_to_forward,
+        pairs_per_station_mean: pairs as f64 / (pdests.len().max(1) * net.stations.len()) as f64,
+    };
 
     let out = Output {
         date: rules.date.clone(),
@@ -251,6 +330,7 @@ pub fn run(a: Args) -> Result<()> {
             differing_labels,
         },
         engines,
+        profiles,
     };
 
     let n = &out.network;
@@ -280,6 +360,21 @@ pub fn run(a: Args) -> Result<()> {
             e.name, l.mean_ms, l.p50_ms, l.p95_ms, l.max_ms, e.work_mean, e.work_max, e.work_unit
         );
     }
+
+    let p = &out.profiles;
+    println!();
+    println!(
+        "profiles: {} destinations, backward scan mean {:.1} ms (p50 {:.1}, max {:.1}); {} lookups at {:.2} µs each; {}/{} equal to a forward scan; {:.1} (ready, visit) pairs per station",
+        p.destinations,
+        p.scan.mean_ms,
+        p.scan.p50_ms,
+        p.scan.max_ms,
+        p.lookups,
+        p.lookup_us_mean,
+        p.identical_to_forward,
+        p.lookups,
+        p.pairs_per_station_mean
+    );
 
     if let Some(dir) = a.out.parent() {
         std::fs::create_dir_all(dir)?;
