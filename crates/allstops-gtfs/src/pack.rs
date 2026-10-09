@@ -198,11 +198,66 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
     let keep_type = |rt: u16| {
         src.visit_types.contains(&rt) || src.connector_types.iter().any(|r| r.contains(&rt))
     };
-    let routes: HashSet<String> = feed
-        .routes
+    // Trips: those of the target and connector modes, and everything that
+    // decides which trip their vehicle runs next (docs/RULES.md): the other
+    // trips of their blocks and the trips of their linked-trips rows,
+    // repeated until nothing changes. Trips of other modes kept this way
+    // never enter a network.
+    let mut keep_trip: Vec<bool> = feed
+        .trips
         .iter()
-        .filter(|r| keep_type(r.route_type))
-        .map(|r| r.id.clone())
+        .map(|t| keep_type(feed.routes[t.route as usize].route_type))
+        .collect();
+    let mut blocks: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (ti, t) in feed.trips.iter().enumerate() {
+        if !t.block_id.is_empty() {
+            blocks.entry(t.block_id.as_str()).or_default().push(ti);
+        }
+    }
+    let links: Vec<(usize, usize)> = feed
+        .transfers
+        .iter()
+        .filter(|t| matches!(t.transfer_type, 4 | 5))
+        .filter_map(|t| Some((t.from_trip? as usize, t.to_trip? as usize)))
+        .collect();
+    loop {
+        let mut changed = false;
+        for members in blocks.values() {
+            if members.iter().any(|&t| keep_trip[t]) {
+                for &t in members {
+                    changed |= !std::mem::replace(&mut keep_trip[t], true);
+                }
+            }
+        }
+        for &(a, z) in &links {
+            if keep_trip[a] != keep_trip[z] {
+                keep_trip[a] = true;
+                keep_trip[z] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let routes: HashSet<String> = feed
+        .trips
+        .iter()
+        .zip(&keep_trip)
+        .filter(|(_, k)| **k)
+        .map(|(t, _)| feed.routes[t.route as usize].id.clone())
+        .collect();
+    // trips.txt IDs: a run expanded from frequencies.txt is kept through its
+    // template's row.
+    let raw_trips: HashSet<String> = feed
+        .trips
+        .iter()
+        .zip(&keep_trip)
+        .filter(|(_, k)| **k)
+        .map(|(t, _)| match t.template {
+            Some(x) => feed.trips[x as usize].id.clone(),
+            None => t.id.clone(),
+        })
         .collect();
 
     // Stations: the targets, every station a kept trip calls at, and the
@@ -211,11 +266,9 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
     for &t in src.targets {
         keep_station[t as usize] = true;
     }
-    for (ti, trip) in feed.trips.iter().enumerate() {
-        if routes.contains(&feed.routes[trip.route as usize].id) {
-            for st in feed.trip_stop_times(ti as u32) {
-                keep_station[c.station_of_stop[st.stop as usize] as usize] = true;
-            }
+    for (ti, _) in keep_trip.iter().enumerate().filter(|(_, k)| **k) {
+        for st in feed.trip_stop_times(ti as u32) {
+            keep_station[c.station_of_stop[st.stop as usize] as usize] = true;
         }
     }
     loop {
@@ -267,7 +320,7 @@ pub fn build(src: &PackSource, limits: &Limits) -> Result<Vec<u8>> {
     let walks = src.walks.clone();
     let targets: Vec<u32> = src.targets.iter().map(|&t| new_index[t as usize]).collect();
 
-    let gtfs = subset_zip(src.zip, limits, &routes, &stops)?;
+    let gtfs = subset_zip(src.zip, limits, &routes, &raw_trips, &stops)?;
     let subset = Feed::from_zip_bytes(&gtfs, limits)?;
     let clustering = clustering_from(&subset, &stations)?;
     let tables = encode_stop_times(&subset)?;
@@ -744,8 +797,6 @@ enum Keep<'a> {
     All,
     /// Rows whose value in this column is in the set.
     By(&'static str, &'a HashSet<String>),
-    /// trips.txt rows of the kept routes; their trip IDs are remembered.
-    Trips(&'a HashSet<String>),
     Transfers,
 }
 
@@ -771,10 +822,10 @@ fn subset_zip(
     zip: &[u8],
     limits: &Limits,
     routes: &HashSet<String>,
+    trips: &HashSet<String>,
     stops: &HashSet<String>,
 ) -> Result<Vec<u8>> {
     let mut archive = Archive::open(zip, limits)?;
-    let mut trips: HashSet<String> = HashSet::new();
     let opts = SimpleFileOptions::DEFAULT
         .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(Some(6))
@@ -785,8 +836,7 @@ fn subset_zip(
     for name in FILES {
         let keep = match name {
             "routes.txt" => Keep::By("route_id", routes),
-            "trips.txt" => Keep::Trips(routes),
-            "stop_times.txt" | "frequencies.txt" => Keep::By("trip_id", &trips),
+            "trips.txt" | "stop_times.txt" | "frequencies.txt" => Keep::By("trip_id", trips),
             // Every calendar row stays, so the feed's service range (and with
             // it the accepted plan dates) is the same from a pack.
             "stops.txt" => Keep::By("stop_id", stops),
@@ -796,12 +846,11 @@ fn subset_zip(
         let max_rows = limits.max_rows_per_file;
         let filtered = archive.with_reader(name, |r| {
             let mut t = Table::new(name, r, max_rows)?;
-            filter_table(&mut t, &keep, routes, &trips, stops)
+            filter_table(&mut t, &keep, routes, trips, stops)
         })?;
-        let Some((csv, kept_trips)) = filtered else {
+        let Some(csv) = filtered else {
             continue;
         };
-        trips.extend(kept_trips);
         w.start_file(name, opts).map_err(zip_err)?;
         w.write_all(&csv)
             .map_err(|e| pack_error(format!("writing the GTFS subset: {e}")))?;
@@ -809,15 +858,14 @@ fn subset_zip(
     Ok(w.finish().map_err(zip_err)?.into_inner())
 }
 
-/// Copy the header and the kept rows of one table. For trips.txt, also
-/// return the trip IDs of the kept rows.
+/// Copy the header and the kept rows of one table.
 fn filter_table(
     t: &mut Table,
     keep: &Keep,
     routes: &HashSet<String>,
     trips: &HashSet<String>,
     stops: &HashSet<String>,
-) -> Result<(Vec<u8>, Vec<String>)> {
+) -> Result<Vec<u8>> {
     let file = t.file().to_string();
     let mut out = csv::WriterBuilder::new()
         .flexible(true)
@@ -825,10 +873,9 @@ fn filter_table(
     let csv_err = |e: csv::Error| pack_error(format!("writing {file}: {e}"));
     out.write_record(t.headers()).map_err(csv_err)?;
     let col = |name: &str| t.column(name);
-    let (key, trip_col) = match keep {
-        Keep::By(c, _) => (col(c), None),
-        Keep::Trips(_) => (col("route_id"), col("trip_id")),
-        _ => (None, None),
+    let key = match keep {
+        Keep::By(c, _) => col(c),
+        _ => None,
     };
     let refs: Vec<(Option<usize>, &HashSet<String>)> = match keep {
         Keep::Transfers => vec![
@@ -841,11 +888,10 @@ fn filter_table(
         ],
         _ => Vec::new(),
     };
-    let mut kept_trips = Vec::new();
     while t.next_row()? {
         let keep_row = match keep {
             Keep::All => true,
-            Keep::By(_, set) | Keep::Trips(set) => key.is_some() && set.contains(t.get(key)?),
+            Keep::By(_, set) => key.is_some() && set.contains(t.get(key)?),
             Keep::Transfers => {
                 let mut ok = true;
                 for (c, set) in &refs {
@@ -861,15 +907,12 @@ fn filter_table(
         if !keep_row {
             continue;
         }
-        if let Keep::Trips(_) = keep {
-            kept_trips.push(t.get(trip_col)?.to_string());
-        }
         out.write_byte_record(t.record()).map_err(csv_err)?;
     }
     let bytes = out
         .into_inner()
         .map_err(|e| pack_error(format!("writing {file}: {e}")))?;
-    Ok((bytes, kept_trips))
+    Ok(bytes)
 }
 
 #[cfg(test)]

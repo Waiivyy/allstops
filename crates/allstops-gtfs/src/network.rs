@@ -442,8 +442,19 @@ fn continuation_chains(
             }
         }
     }
+    for to in linked.values_mut() {
+        to.sort_unstable();
+        to.dedup();
+    }
+    // A trip with fewer than two calls has no hop to ride, so it never joins;
+    // a vehicle running one between two others still breaks their chain.
+    // With at least two calls per trip and at most MAX_CALLS_PER_TRIP calls
+    // per chain, every part starts at a call index that fits a hop index.
     let joins = |a: u32, z: u32| {
         let (sa, sz) = (feed.trip_stop_times(a), feed.trip_stop_times(z));
+        if sa.len() < 2 || sz.len() < 2 {
+            return false;
+        }
         let (last, first) = (sa[sa.len() - 1], sz[0]);
         a != z
             && clustering.station_of_stop[last.stop as usize]

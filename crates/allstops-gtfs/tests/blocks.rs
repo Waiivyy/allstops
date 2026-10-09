@@ -157,3 +157,28 @@ fn a_trip_continuing_as_two_trips_joins_neither() {
         3
     );
 }
+
+#[test]
+fn a_one_stop_trip_breaks_the_chain() {
+    // B has a single call: no hop to ride. A's vehicle runs B next, so it
+    // does not continue as C directly, and nothing joins.
+    let trips = "route_id,service_id,trip_id,trip_headsign,block_id\n\
+                 R,WD,A,Two,X\nR,WD,B,Two,X\nR,WD,C,Three,X\n";
+    let stop_times = "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n\
+        A,08:00:00,08:00:00,S1a,1\nA,08:10:00,08:10:00,S2a,2\n\
+        B,08:15:00,08:15:00,S2a,1\n\
+        C,08:20:00,08:20:00,S2b,1\nC,08:30:00,08:30:00,S3a,2\n";
+    assert_eq!(trip_ids(&network(trips, stop_times, None, true)).len(), 2);
+}
+
+#[test]
+fn a_repeated_linked_trips_row_is_still_one_to_one() {
+    let none = "route_id,service_id,trip_id,trip_headsign\nR,WD,A,Two\nR,WD,B,Three\n";
+    let header =
+        "from_stop_id,to_stop_id,from_trip_id,to_trip_id,transfer_type,min_transfer_time\n";
+    let twice = format!("{header},,A,B,4,\n,,A,B,4,\n");
+    assert_eq!(
+        trip_ids(&network(none, STOP_TIMES, Some(&twice), true)),
+        vec![vec!["A", "B"]]
+    );
+}

@@ -546,3 +546,59 @@ fn the_plan_date_range_is_the_feeds_without_declared_dates() {
     ));
     assert!(ok(&p.feed, &p.clustering, &p.targets, &p.walks));
 }
+
+#[test]
+fn a_pack_keeps_what_decides_which_trip_a_vehicle_runs_next() {
+    // Block X: U-Bahn A, then a rail trip M (not in the pack's modes), then
+    // U-Bahn B. A's vehicle runs M next, so A does not continue as B, from
+    // the feed or from the pack.
+    let zip = minimal_with(&[
+        (
+            "stops.txt",
+            "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n\
+             S1,One,48.10,11.50,1,\nS1a,One,48.10,11.50,0,S1\n\
+             S2,Two,48.11,11.50,1,\nS2a,Two,48.11,11.50,0,S2\n\
+             S3,Three,48.12,11.50,1,\nS3a,Three,48.12,11.50,0,S3\n",
+        ),
+        (
+            "routes.txt",
+            "route_id,agency_id,route_short_name,route_long_name,route_type\nR,A,U1,,1\nRL,A,RB,,2\n",
+        ),
+        (
+            "trips.txt",
+            "route_id,service_id,trip_id,trip_headsign,block_id\nR,WD,A,Two,X\nRL,WD,M,Three,X\nR,WD,B,Three,X\n",
+        ),
+        (
+            "stop_times.txt",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n\
+             A,08:00:00,08:00:00,S1a,1\nA,08:10:00,08:10:00,S2a,2\n\
+             M,08:12:00,08:12:00,S2a,1\nM,08:14:00,08:14:00,S2a,2\n\
+             B,08:20:00,08:20:00,S2a,1\nB,08:30:00,08:30:00,S3a,2\n",
+        ),
+    ]);
+    let i = input_from(zip);
+    let p = pack::read(&pack_of(&i, &WalkOverrides::default()), &Limits::default()).unwrap();
+    let rules = Rules {
+        date: "2026-11-12".into(),
+        connector_modes: vec!["tram".into()],
+        stay_aboard_through_terminus: true,
+        ..Rules::default()
+    };
+    let net = |feed: &Feed, c: &Clustering, t: &[u32], w: &WalkOverrides| {
+        build_network(feed, &ServiceCalendar::new(feed), c, t, &[1..=1], &rules, w)
+            .unwrap()
+            .0
+    };
+    let a = net(
+        &i.feed,
+        &i.clustering,
+        &i.targets,
+        &WalkOverrides::default(),
+    );
+    let b = net(&p.feed, &p.clustering, &p.targets, &p.walks);
+    assert!(
+        a.trips.iter().all(|t| t.continues_as.is_empty()),
+        "nothing joins"
+    );
+    assert!(postcard::to_allocvec(&a).unwrap() == postcard::to_allocvec(&b).unwrap());
+}
